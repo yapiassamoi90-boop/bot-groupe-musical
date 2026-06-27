@@ -2,6 +2,7 @@ require('dotenv').config();
 const { makeWASocket, useMultiFileAuthState, DisconnectReason } = require('@whiskeysockets/ba' + 'ileys');
 const { createClient } = require('@supabase/supabase-js');
 const pino = require('pino');
+const qrcode = require('qrcode-terminal'); // Assurez-vous d'avoir fait 'npm install qrcode-terminal'
 
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
 
@@ -14,15 +15,15 @@ async function startBot() {
         browser: ['Bot Musical', 'Chrome', '1.0.0']
     });
 
-    // --- MISE À JOUR : CODE D'APPAIRAGE ---
-    if (!sock.authState.creds.me) {
-        const phoneNumber = process.env.WHATSAPP_NUMBER; // Mettez votre numéro dans les variables Railway
-        const code = await sock.requestPairingCode(phoneNumber);
-        console.log(`--- VOTRE CODE D'APPAIRAGE EST : ${code} ---`);
-    }
-
     sock.ev.on('connection.update', (update) => {
-        const { connection, lastDisconnect } = update;
+        const { connection, qr, lastDisconnect } = update;
+        
+        // --- QR CODE COMPACT POUR RAILWAY ---
+        if (qr) {
+            console.log("--- SCANNEZ LE QR CODE CI-DESSOUS ---");
+            qrcode.generate(qr, { small: true }); 
+        }
+        
         if (connection === 'close') {
             const shouldReconnect = lastDisconnect.error?.output?.statusCode !== DisconnectReason.loggedOut;
             if (shouldReconnect) startBot();
@@ -33,7 +34,7 @@ async function startBot() {
 
     sock.ev.on('creds.update', saveCreds);
 
-    // Boucle de vérification
+    // Boucle de vérification Supabase
     setInterval(async () => {
         const { data: programmes } = await supabase.from('programmes').select('*').eq('actif', true);
         if (!programmes) return;
@@ -44,8 +45,13 @@ async function startBot() {
 
         for (const p of programmes) {
             if (p.heure === heureActuelle && p.date_complete === dateActuelle) {
-                await sock.sendMessage(p.chat_id + '@s.whatsapp.net', { text: `🔔 ${p.chantre}\n\n${p.texte}` });
-                await supabase.from('programmes').update({ actif: false }).eq('id', p.id);
+                try {
+                    await sock.sendMessage(p.chat_id + '@s.whatsapp.net', { text: `🔔 ${p.chantre}\n\n${p.texte}` });
+                    await supabase.from('programmes').update({ actif: false }).eq('id', p.id);
+                    console.log(`✅ Message envoyé : ${p.chantre}`);
+                } catch (err) {
+                    console.error("Erreur lors de l'envoi :", err);
+                }
             }
         }
     }, 60000); 
