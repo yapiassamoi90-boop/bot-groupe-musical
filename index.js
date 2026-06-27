@@ -1,9 +1,7 @@
 const { default: makeWASocket, useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVersion } = require('@whiskeysockets/baileys');
 const pino = require('pino');
-const readline = require('readline');
 
-const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-const question = (text) => new Promise((resolve) => rl.question(text, resolve));
+const PHONE_NUMBER = process.env.PHONE_NUMBER; // <- Il prend le numéro sur Railway
 
 async function startBot() {
     const { state, saveCreds } = await useMultiFileAuthState('auth_info_baileys');
@@ -14,14 +12,14 @@ async function startBot() {
         logger: pino({ level: 'silent' })
     });
 
-    if (!sock.authState.creds.registered) {
-        const phoneNumber = await question('Entre ton numéro WhatsApp avec +225: ');
-        const code = await sock.requestPairingCode(phoneNumber.replace(/[^0-9]/g, ''));
-        console.log('CODE À ENTRER SUR WHATSAPP:', code); // <- C'EST ÇA QU'ON VEUT
+    if (!sock.authState.creds.registered && PHONE_NUMBER) {
+        const code = await sock.requestPairingCode(PHONE_NUMBER);
+        console.log('====================================');
+        console.log('CODE À ENTRER SUR WHATSAPP:', code); // <- LE CODE SERA ICI
+        console.log('====================================');
     }
 
     sock.ev.on('creds.update', saveCreds);
-
     sock.ev.on('messages.upsert', async m => {
         const msg = m.messages[0];
         if (!msg.message || msg.key.fromMe) return;
@@ -31,11 +29,9 @@ async function startBot() {
             await sock.sendMessage(from, { text: 'H-BOT V9 Présent Chef 🔥 Je t’entends.' });
         }
     });
-
     sock.ev.on('connection.update', (update) => {
-        const { connection } = update;
-        if(connection === 'open') console.log('Connexion: open ✅ Bot en ligne');
-        if(connection === 'close') startBot();
+        if(update.connection === 'open') console.log('Connexion: open ✅ Bot en ligne');
+        if(update.connection === 'close') startBot();
     });
 }
 startBot();
