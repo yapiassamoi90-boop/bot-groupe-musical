@@ -1,4 +1,9 @@
 ﻿require('dotenv').config();
+const fs = require('fs');
+if(process.env.AUTH_JSON && !fs.existsSync('./auth_info_baileys')){
+    fs.mkdirSync('./auth_info_baileys');
+    fs.writeFileSync('./auth_info_baileys/creds.json', process.env.AUTH_JSON);
+}
 const { default: makeWASocket, useMultiFileAuthState, DisconnectReason } = require('@whiskeysockets/baileys');
 const pino = require('pino');
 const qrcode = require('qrcode-terminal');
