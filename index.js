@@ -25,9 +25,13 @@ async function startBot() {
     sock.ev.on('connection.update', (update) => {
         const { connection, lastDisconnect } = update;
         if(connection === 'close') {
-            if((lastDisconnect.error)?.output?.statusCode!== DisconnectReason.loggedOut) startBot();
+            if((lastDisconnect.error)?.output?.statusCode!== DisconnectReason.loggedOut) {
+                console.log('Reconnexion...');
+                startBot();
+            }
+        } else if (connection === 'open') {
+            console.log('Connexion: open ✅ Bot en ligne');
         }
-        console.log('Connexion:', connection);
     });
 }
 startBot();
