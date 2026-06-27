@@ -2,7 +2,7 @@ require('dotenv').config();
 const { makeWASocket, useMultiFileAuthState, DisconnectReason } = require('@whiskeysockets/ba' + 'ileys');
 const { createClient } = require('@supabase/supabase-js');
 const pino = require('pino');
-const qrcode = require('qrcode-terminal'); // Assurez-vous d'avoir fait 'npm install qrcode-terminal'
+const qrcode = require('qrcode-terminal');
 
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
 
@@ -18,15 +18,17 @@ async function startBot() {
     sock.ev.on('connection.update', (update) => {
         const { connection, qr, lastDisconnect } = update;
         
-        // --- QR CODE COMPACT POUR RAILWAY ---
         if (qr) {
             console.log("--- SCANNEZ LE QR CODE CI-DESSOUS ---");
             qrcode.generate(qr, { small: true }); 
         }
         
         if (connection === 'close') {
-            const shouldReconnect = lastDisconnect.error?.output?.statusCode !== DisconnectReason.loggedOut;
-            if (shouldReconnect) startBot();
+            const shouldReconnect = lastDisconnect?.output?.statusCode !== DisconnectReason.loggedOut;
+            if (shouldReconnect) {
+                console.log("Connexion fermée, tentative de reconnexion dans 5 secondes...");
+                setTimeout(startBot, 5000);
+            }
         } else if (connection === 'open') {
             console.log("✅ Bot WhatsApp connecté avec succès !");
         }
@@ -34,10 +36,9 @@ async function startBot() {
 
     sock.ev.on('creds.update', saveCreds);
 
-    // Boucle de vérification Supabase
     setInterval(async () => {
         const { data: programmes } = await supabase.from('programmes').select('*').eq('actif', true);
-        if (!programmes) return;
+        if (!programmes || programmes.length === 0) return;
 
         const now = new Date();
         const heureActuelle = now.toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit', hour12: false });
