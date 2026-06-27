@@ -15,7 +15,7 @@ async function startBot() {
     if (!sock.authState.creds.registered && PHONE_NUMBER) {
         const code = await sock.requestPairingCode(PHONE_NUMBER);
         console.log('====================================');
-        console.log('CODE À ENTRER SUR WHATSAPP:', code); // <- LE CODE SERA ICI
+        console.log('CODE À ENTRER SUR WHATSAPP:', code); //
         console.log('====================================');
     }
 
