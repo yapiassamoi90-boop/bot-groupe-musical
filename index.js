@@ -1,6 +1,9 @@
 const { default: makeWASocket, useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVersion } = require('@whiskeysockets/baileys');
 const pino = require('pino');
-const fs = require('fs');
+const readline = require('readline');
+
+const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+const question = (text) => new Promise((resolve) => rl.question(text, resolve));
 
 async function startBot() {
     const { state, saveCreds } = await useMultiFileAuthState('auth_info_baileys');
@@ -8,9 +11,14 @@ async function startBot() {
     const sock = makeWASocket({
         version,
         auth: state,
-        logger: pino({ level: 'silent' }),
-        printQRInTerminal: true // <- C'EST ÇA QUI AFFICHE LE QR
+        logger: pino({ level: 'silent' })
     });
+
+    if (!sock.authState.creds.registered) {
+        const phoneNumber = await question('Entre ton numéro WhatsApp avec +225: ');
+        const code = await sock.requestPairingCode(phoneNumber.replace(/[^0-9]/g, ''));
+        console.log('CODE À ENTRER SUR WHATSAPP:', code); // <- C'EST ÇA QU'ON VEUT
+    }
 
     sock.ev.on('creds.update', saveCreds);
 
@@ -25,13 +33,9 @@ async function startBot() {
     });
 
     sock.ev.on('connection.update', (update) => {
-        const { connection, qr } = update;
-        if(qr) console.log('SCANNE CE QR CODE CI-DESSUS 👆');
+        const { connection } = update;
         if(connection === 'open') console.log('Connexion: open ✅ Bot en ligne');
-        if(connection === 'close') {
-            const statusCode = update.lastDisconnect.error?.output?.statusCode;
-            if(statusCode!== DisconnectReason.loggedOut) startBot();
-        }
+        if(connection === 'close') startBot();
     });
 }
 startBot();
