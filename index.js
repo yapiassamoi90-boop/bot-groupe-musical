@@ -3,37 +3,32 @@ const qrcode = require('qrcode-terminal');
 const pino = require('pino');
 const http = require('http');
 
-// Faux serveur pour Railway
 http.createServer((req, res) => res.end('Bot OK')).listen(process.env.PORT || 3000);
 console.log(`🌐 Serveur actif sur ${process.env.PORT || 3000}`);
 
-let qrAffiché = false; // <- NOUVEAU : On affiche le QR 1 seule fois
+let qrAffiché = false;
 
 async function startBot() {
     const { state, saveCreds } = await useMultiFileAuthState('session');
-    const sock = makeWASocket({
-        auth: state,
-        printQRInTerminal: false, // On gère nous-même
-        logger: pino({ level: 'silent' })
-    });
+    const sock = makeWASocket({ auth: state, printQRInTerminal: false, logger: pino({ level: 'silent' }) });
 
     sock.ev.on('creds.update', saveCreds);
     sock.ev.on('connection.update', (update) => {
         const { connection, lastDisconnect, qr } = update;
-        if (qr && !qrAffiché) { // <- On affiche 1 seule fois
+        if (qr && !qrAffiché) {
             qrAffiché = true;
-            console.log('\n👉 SCAN CE QR MAINTENANT AVEC WHATSAPP\n');
-            qrcode.generate(qr, { small: false }); // GROS QR
-            console.log('\nTU AS 2 MINUTES POUR SCANNER\n');
+            const lienQR = `https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=${encodeURIComponent(qr)}`;
+            console.log('\n👉 LIEN QR: CLIQUE ICI =>', lienQR, '\n');
+            console.log('👉 OU SCAN CE GROS QR:\n');
+            qrcode.generate(qr, { small: false });
         }
         if (connection === 'close') {
             const shouldReconnect = (lastDisconnect.error)?.output?.statusCode !== DisconnectReason.loggedOut;
             console.log('Déconnecté. Raison:', lastDisconnect.error?.output?.statusCode);
-            if (shouldReconnect) startBot();
+            if (shouldReconnect) { qrAffiché = false; startBot(); } // On reset pour nouveau QR
         } else if (connection === 'open') {
             console.log('✅ Bot connecté !');
         }
     });
 }
-
 startBot();
