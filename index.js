@@ -6,7 +6,7 @@ const PHONE_NUMBER = process.env.PHONE_NUMBER?.trim();
 async function startBot() {
     const { state, saveCreds } = await useMultiFileAuthState('auth_info_baileys');
     const { version } = await fetchLatestBaileysVersion();
-    const sock = makeWASocket({ version, auth: state, logger: pino({ level: 'debug' }) });
+    const sock = makeWASocket({ version, auth: state, logger: pino({ level: 'silent' }) });
 
     if (!state.creds.registered) {
         console.log('Attente 5s avant de demander le code...');
