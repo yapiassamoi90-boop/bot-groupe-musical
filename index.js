@@ -4,13 +4,10 @@ const pino = require('pino');
 const http = require('http');
 const qrcode = require('qrcode-terminal');
 
-// Configuration
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
 
-// Serveur HTTP pour Railway
 http.createServer((req, res) => res.end('Bot actif')).listen(process.env.PORT || 3000);
 
-// Adaptateur Supabase
 async function useSupabaseAuthState(supabase, tableName) {
     const read = async (key) => {
         const { data } = await supabase.from(tableName).select('value').eq('key', key).single();
@@ -20,7 +17,7 @@ async function useSupabaseAuthState(supabase, tableName) {
         await supabase.from(tableName).upsert({ key, value });
     };
 
-    const creds = (await read('creds')) || {};
+    const creds = (await read('creds')) || { noiseKey: null }; // Force une structure si vide
     return {
         state: { creds, keys: {} },
         saveCreds: () => write('creds', creds)
@@ -42,14 +39,15 @@ async function startBot() {
         const { connection, lastDisconnect, qr } = update;
         
         if (qr) {
-            console.log("SCANNE CE QR CODE :");
+            console.log("SCANNE CE QR CODE : ");
             qrcode.generate(qr, { small: true });
         }
 
         if (connection === 'close') {
             const shouldReconnect = lastDisconnect.error?.output?.statusCode !== DisconnectReason.loggedOut;
-            console.log('⚠️ Connexion fermée, tentative de reconnexion...');
-            if (shouldReconnect) startBot();
+            if (shouldReconnect) {
+                setTimeout(startBot, 5000); // Attend 5 secondes avant de réessayer
+            }
         } else if (connection === 'open') {
             console.log('✅ Bot WhatsApp connecté avec succès via Supabase !');
         }
