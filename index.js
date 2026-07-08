@@ -1,4 +1,4 @@
-const { default: makeWASocket, DisconnectReason, useMultiFileAuthState, downloadMediaMessage } = require('@whiskeysockets/baileys');
+const { default: makeWASocket, useMultiFileAuthState, downloadMediaMessage } = require('@whiskeysockets/baileys');
 const pino = require('pino');
 const tesseract = require('tesseract.js');
 const pdf = require('pdf-parse');
@@ -13,7 +13,6 @@ let sock;
 let ADMIN_ID = null;
 const jours_fr = {"Monday": "Lundi", "Tuesday": "Mardi", "Wednesday": "Mercredi", "Thursday": "Jeudi", "Friday": "Vendredi", "Saturday": "Samedi", "Sunday": "Dimanche"};
 
-// --- ENVOI RAPPEL + CONFIRMATION ---
 async function sendReminder(jid, message) {
     try {
         await sock.sendMessage(jid, { text: message });
@@ -25,11 +24,11 @@ async function sendReminder(jid, message) {
     } catch (e) { console.error(e); }
 }
 
-// --- LECTURE OCR ---
 async function lireImage(buffer) {
     const { data: { text } } = await tesseract.recognize(buffer, 'fra');
     return text;
 }
+
 async function lirePdf(buffer) {
     const data = await pdf(buffer);
     return data.text;
@@ -74,10 +73,9 @@ async function programerRappels(groupeId, programme) {
             dtSamedi.setDate(dtDimanche.getDate() - 1);
             dtSamedi.setHours(14, 0, 0, 0);
 
-            // Noms complets écrits en entier
+            // Noms complets écrits en entier (sans abréviation)
             const nomsStr = `Adoration: ${noms[0]}\nCélébration: ${noms[1]}\nOffrande: ${noms[2]}`;
 
-            // Annule l'ancien job s'il existe déjà pour cette date (équivalent de replace_existing)
             if (schedule.scheduledJobs[`v_${groupeId}_${dateStr}`]) schedule.cancelJob(`v_${groupeId}_${dateStr}`);
             if (schedule.scheduledJobs[`s_${groupeId}_${dateStr}`]) schedule.cancelJob(`s_${groupeId}_${dateStr}`);
 
@@ -92,7 +90,6 @@ async function programerRappels(groupeId, programme) {
     }
 }
 
-// Fonction pour envoyer la liste détaillée au propriétaire (PV)
 async function afficherListeDetails(recipientJid) {
     const jobs = schedule.scheduledJobs;
     const activeJobs = Object.keys(jobs).filter(name => name.includes('_'));
@@ -115,7 +112,6 @@ async function afficherListeDetails(recipientJid) {
     await sock.sendMessage(recipientJid, { text: reponse });
 }
 
-// --- BOT PRINCIPAL ---
 async function startBot() {
     const { state, saveCreds } = await useMultiFileAuthState('auth_info');
     sock = makeWASocket({ logger: pino({ level: 'silent' }), auth: state, printQRInTerminal: true });
