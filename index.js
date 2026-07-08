@@ -1,5 +1,6 @@
-const { default: makeWASocket, useMultiFileAuthState, downloadMediaMessage } = require('@whiskeysockets/baileys');
+const { default: makeWASocket, useMultiFileAuthState } = require('@whiskeysockets/baileys');
 const pino = require('pino');
+const qrcode = require('qrcode-terminal');
 const tesseract = require('tesseract.js');
 const pdf = require('pdf-parse');
 const schedule = require('node-schedule');
@@ -73,7 +74,6 @@ async function programerRappels(groupeId, programme) {
             dtSamedi.setDate(dtDimanche.getDate() - 1);
             dtSamedi.setHours(14, 0, 0, 0);
 
-            // Noms complets écrits en entier (sans abréviation)
             const nomsStr = `Adoration: ${noms[0]}\nCélébration: ${noms[1]}\nOffrande: ${noms[2]}`;
 
             if (schedule.scheduledJobs[`v_${groupeId}_${dateStr}`]) schedule.cancelJob(`v_${groupeId}_${dateStr}`);
@@ -84,7 +84,7 @@ async function programerRappels(groupeId, programme) {
             });
 
             schedule.scheduleJob(`s_${groupeId}_${dateStr}`, dtSamedi, () => {
-                sendReminder(groupeId, `🔔 RAPPEL: Répétition AUJOURD'HUI à 16h.\n\nN'oubliez pas:\n${nomsStr}\nSoyez à l'heure!`);
+                sendReminder(groupeId, `🔔 RAPPEL: Répétition AUJOURD'HUI à 16h.\n\nN'oubliez pas:\n{nomsStr}\nSoyez à l'heure!`);
             });
         } catch (e) { console.error("Date invalide", dateStr); }
     }
@@ -114,13 +114,27 @@ async function afficherListeDetails(recipientJid) {
 
 async function startBot() {
     const { state, saveCreds } = await useMultiFileAuthState('auth_info');
-    sock = makeWASocket({ logger: pino({ level: 'silent' }), auth: state, printQRInTerminal: true });
+    
+    sock = makeWASocket({ 
+        logger: pino({ level: 'silent' }), 
+        auth: state 
+    });
+
+    sock.ev.on('connection.update', (update) => {
+        const { connection, qr, lastDisconnect } = update;
+        
+        // Affiche explicitement le QR code dans les logs du serveur
+        if (qr) {
+            qrcode.generate(qr, { small: true });
+            console.log("📲 Scanne ce QR code avec ton WhatsApp (Appareils liés).");
+        }
+
+        if (connection === 'open') {
+            console.log('✅ Bot WhatsApp connecté et en ligne...');
+        }
+    });
 
     sock.ev.on('creds.update', saveCreds);
-    sock.ev.on('connection.update', (update) => {
-        const { connection } = update;
-        if (connection === 'open') console.log('✅ Bot WhatsApp connecté et en ligne...');
-    });
 
     sock.ev.on('messages.upsert', async ({ messages }) => {
         const msg = messages[0];
