@@ -74,6 +74,7 @@ async function programerRappels(groupeId, programme) {
             dtSamedi.setDate(dtDimanche.getDate() - 1);
             dtSamedi.setHours(14, 0, 0, 0);
 
+            // Noms complets écrits en entier
             const nomsStr = `Adoration: ${noms[0]}\nCélébration: ${noms[1]}\nOffrande: ${noms[2]}`;
 
             if (schedule.scheduledJobs[`v_${groupeId}_${dateStr}`]) schedule.cancelJob(`v_${groupeId}_${dateStr}`);
@@ -84,7 +85,7 @@ async function programerRappels(groupeId, programme) {
             });
 
             schedule.scheduleJob(`s_${groupeId}_${dateStr}`, dtSamedi, () => {
-                sendReminder(groupeId, `🔔 RAPPEL: Répétition AUJOURD'HUI à 16h.\n\nN'oubliez pas:\n{nomsStr}\nSoyez à l'heure!`);
+                sendReminder(groupeId, `🔔 RAPPEL: Répétition AUJOURD'HUI à 16h.\n\nN'oubliez pas:\n${nomsStr}\nSoyez à l'heure!`);
             });
         } catch (e) { console.error("Date invalide", dateStr); }
     }
@@ -121,14 +122,11 @@ async function startBot() {
     });
 
     sock.ev.on('connection.update', (update) => {
-        const { connection, qr, lastDisconnect } = update;
-        
-        // Affiche explicitement le QR code dans les logs du serveur
+        const { connection, qr } = update;
         if (qr) {
+            console.log("=== SCANNE CE QR CODE ===");
             qrcode.generate(qr, { small: true });
-            console.log("📲 Scanne ce QR code avec ton WhatsApp (Appareils liés).");
         }
-
         if (connection === 'open') {
             console.log('✅ Bot WhatsApp connecté et en ligne...');
         }
