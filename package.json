@@ -1,18 +1,26 @@
+
 {
-  "name": "bot-groupe-musical",
+  "name": "hbot2",
   "version": "1.0.0",
+  "private": true,
+  "description": "Bot WhatsApp Hbot2 avec IA, mémoire de groupe, recherche web et voix",
+  "type": "module",
   "main": "index.js",
-  "type": "commonjs",
   "scripts": {
-    "start": "node index.js"
+    "start": "node index.js",
+    "check": "node --check index.js"
+  },
+  "engines": {
+    "node": ">=20.0.0"
   },
   "dependencies": {
-    "@whiskeysockets/baileys": "^6.7.5",
-    "@supabase/supabase-js": "^2.45.0",
-    "node-schedule": "^2.1.1",
-    "pdf-parse": "^1.1.1",
-    "pino": "^9.0.0",
-    "qrcode-terminal": "^0.12.0",
-    "tesseract.js": "^5.1.0"
+    "@hapi/boom": "^10.0.1",
+    "@whiskeysockets/baileys": "^6.7.18",
+    "express": "^4.21.2",
+    "firebase-admin": "^13.0.2",
+    "groq-sdk": "^0.30.0",
+    "ffmpeg-static": "^5.2.0",
+    "pino": "^9.6.0",
+    "qrcode": "^1.5.4"
   }
 }
