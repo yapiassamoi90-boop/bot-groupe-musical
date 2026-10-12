@@ -1,9 +1,8 @@
-
 import makeWASocket, {
-  useMultiFileAuthState,
-  DisconnectReason,
-  fetchLatestBaileysVersion,
-  downloadMediaMessage
+useMultiFileAuthState,
+DisconnectReason,
+fetchLatestBaileysVersion,
+downloadMediaMessage
 } from '@whiskeysockets/baileys';
 
 import { Boom } from '@hapi/boom';
@@ -13,1296 +12,1110 @@ import express from 'express';
 import Groq, { toFile } from 'groq-sdk';
 import admin from 'firebase-admin';
 import ffmpegPath from 'ffmpeg-static';
-import { spawn } from 'node:child_process';
-import { readFile, writeFile, unlink } from 'node:fs/promises';
-import { existsSync, readFileSync } from 'node:fs';
-import path from 'node:path';
-import os from 'node:os';
-import { randomUUID } from 'node:crypto';
+import { spawn } from 'child_process';
+import {
+readFileSync,
+existsSync
+} from 'fs';
+import { once } from 'events';
 
 // ============================================================
 // CONFIGURATION
 // ============================================================
 
-const PORT = Number(process.env.PORT || 3000);
-const BOT_NAME = process.env.BOT_NAME || 'Hbot2';
+const PORT = process.env.PORT || 10000;
 const CREATOR_NAME = 'Assamoi Yapi Hyppolite';
+const BOT_NAME = 'Hbot2';
 
 const GROQ_API_KEY = process.env.GROQ_API_KEY || '';
-const GROQ_MODEL = process.env.GROQ_MODEL || 'openai/gpt-oss-120b';
-const GROQ_AUDIO_MODEL =
-  process.env.GROQ_AUDIO_MODEL || 'whisper-large-v3-turbo';
-const AUDIO_LANGUAGE = process.env.AUDIO_LANGUAGE || 'fr';
+const GROQ_MODEL =
+process.env.GROQ_MODEL || 'openai/gpt-oss-120b';
 
-const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY || '';
-const ELEVENLABS_VOICE_ID = process.env.ELEVENLABS_VOICE_ID || '';
+const WHISPER_MODEL =
+process.env.WHISPER_MODEL || 'whisper-large-v3-turbo';
+
+const WHISPER_LANGUAGE =
+process.env.WHISPER_LANGUAGE || 'fr';
+
+const ELEVENLABS_API_KEY =
+process.env.ELEVENLABS_API_KEY || '';
+
+const ELEVENLABS_VOICE_ID =
+process.env.ELEVENLABS_VOICE_ID || '';
+
 const ELEVENLABS_MODEL =
-  process.env.ELEVENLABS_MODEL || 'eleven_multilingual_v2';
+process.env.ELEVENLABS_MODEL || 'eleven_multilingual_v2';
 
-const TAVILY_API_KEY = process.env.TAVILY_API_KEY || '';
+const TAVILY_API_KEY =
+process.env.TAVILY_API_KEY || '';
 
 const VOICE_REPLY_ENABLED =
-  (process.env.VOICE_REPLY_ENABLED || 'true').toLowerCase() === 'true';
-
-const AUTH_MODE =
-  (process.env.WHATSAPP_AUTH_MODE || 'qr').toLowerCase();
-
-const WHATSAPP_PHONE_NUMBER =
-  (process.env.WHATSAPP_PHONE_NUMBER || '').replace(/\D/g, '');
-
-const AUTH_DIR =
-  process.env.AUTH_DIR || 'auth_info_baileys_hbot2';
-
-const FIREBASE_SERVICE_ACCOUNT =
-  process.env.FIREBASE_SERVICE_ACCOUNT_PATH ||
-  (existsSync('/etc/secrets/serviceAccountKey.json')
-    ? '/etc/secrets/serviceAccountKey.json'
-    : './serviceAccountKey.json');
+String(process.env.VOICE_REPLY_ENABLED ?? 'true')
+.toLowerCase() === 'true';
 
 const MAX_HISTORY = 12;
 const MAX_CONVERSATIONS = 500;
-const MAX_PROCESSED_IDS = 1500;
-const MAX_MEMORY_ITEMS = 120;
+const MAX_GROUP_MEMORY = 120;
 
-const groq = GROQ_API_KEY
-  ? new Groq({ apiKey: GROQ_API_KEY })
-  : null;
+// ============================================================
+// ETAT GLOBAL
+// ============================================================
 
-const app = express();
-app.disable('x-powered-by');
-
-let sock = null;
-let currentQrDataUrl = null;
-let pairingCode = null;
-let connectionStatus = 'Initialisation';
-let lastConnectionUpdate = new Date().toISOString();
-
-let reconnectTimer = null;
+let sockInstance = null;
+let isConnected = false;
+let currentQrImage = null;
 let reconnecting = false;
-let connectionGeneration = 0;
-
-let firebaseReady = false;
 let db = null;
-let firebaseError = '';
-let lastError = '';
+let groq = null;
+let connectionGeneration = 0;
 
 const conversations = new Map();
 const processingMessages = new Set();
-const processedMessages = new Set();
-const processedOrder = [];
+
+// ============================================================
+// EXPRESS / PAGE WEB
+// ============================================================
+
+const app = express();
+app.use(express.json({ limit: '1mb' }));
+
+app.get('/', (req, res) => {
+res.type('html').send(`<!DOCTYPE html>
+
+<html lang="fr">  
+<head>  
+<meta charset="UTF-8">  
+<meta name="viewport" content="width=device-width,initial-scale=1">  
+<meta http-equiv="refresh" content="15">  
+<title>HBOT2</title>  
+<style>  
+body{margin:0;background:#101010;color:#fff;font-family:Arial,sans-serif;text-align:center}  
+.container{max-width:650px;margin:35px auto;padding:25px;background:#1c1c1c;border-radius:18px}  
+h1{color:#25D366}  
+img{width:280px;max-width:90%;background:#fff;padding:8px;border-radius:12px}  
+.info{text-align:left;line-height:1.8;margin-top:25px;overflow-wrap:anywhere}  
+.ok{color:#25D366}.no{color:#ff6565}  
+</style>  
+</head>  
+<body>  
+<div class="container">  
+<h1>🤖 HBOT2</h1>  
+<h3>${isConnected ? '🟢 Connecté à WhatsApp' : '🟡 En attente de connexion'}</h3>  
+${currentQrImage ? `<p>Scanne ce QR code avec WhatsApp.</p><img src="${currentQrImage}" alt="QR WhatsApp">` : ''}  
+<div class="info">  
+<p>👤 Créateur : <strong>${CREATOR_NAME}</strong></p>  
+<p>🧠 Groq : <span class="${groq ? 'ok' : 'no'}">${groq ? 'ACTIF' : 'INACTIF'}</span></p>  
+<p>🎙️ Reconnaissance vocale : <span class="${groq ? 'ok' : 'no'}">${groq ? 'DISPONIBLE' : 'INACTIVE'}</span></p>  
+<p>🔊 Réponse vocale : <span class="${VOICE_REPLY_ENABLED && ELEVENLABS_API_KEY && ELEVENLABS_VOICE_ID ? 'ok' : 'no'}">${VOICE_REPLY_ENABLED && ELEVENLABS_API_KEY && ELEVENLABS_VOICE_ID ? 'ACTIVE' : 'INACTIVE'}</span></p>  
+<p>🌐 Recherche Internet : <span class="${TAVILY_API_KEY ? 'ok' : 'no'}">${TAVILY_API_KEY ? 'ACTIVE' : 'INACTIVE'}</span></p>  
+<p>🔥 Mémoire Firestore : <span class="${db ? 'ok' : 'no'}">${db ? 'ACTIVE' : 'INACTIVE'}</span></p>  
+<p>🧠 Modèle IA : ${GROQ_MODEL}</p>  
+</div>  
+</div>  
+</body>  
+</html>`);  
+});  app.get('/health', (req, res) => {
+res.json({
+ok: true,
+bot: BOT_NAME,
+creator: CREATOR_NAME,
+whatsapp: isConnected,
+groq: Boolean(GROQ_API_KEY),
+whisper: Boolean(GROQ_API_KEY),
+elevenlabs: Boolean(ELEVENLABS_API_KEY && ELEVENLABS_VOICE_ID),
+webSearch: Boolean(TAVILY_API_KEY),
+groupMemory: Boolean(db)
+});
+});
+
+app.listen(PORT, '0.0.0.0', () => {
+console.log(🌐 ${BOT_NAME} disponible sur le port ${PORT});
+});
+
+// ============================================================
+// GROQ
+// ============================================================
+
+if (GROQ_API_KEY) {
+groq = new Groq({ apiKey: GROQ_API_KEY });
+console.log('✅ Groq activé');
+} else {
+console.warn('⚠️ GROQ_API_KEY manquante');
+}
+
+// ============================================================
+// FIREBASE / FIRESTORE
+// ============================================================
+
+try {
+const renderPath = '/etc/secrets/serviceAccountKey.json';
+const localPath = './serviceAccountKey.json';
+let serviceAccount = null;
+
+if (existsSync(renderPath)) {
+serviceAccount = JSON.parse(readFileSync(renderPath, 'utf8'));
+} else if (existsSync(localPath)) {
+serviceAccount = JSON.parse(readFileSync(localPath, 'utf8'));
+}
+
+if (serviceAccount) {
+if (!admin.apps.length) {
+admin.initializeApp({
+credential: admin.credential.cert(serviceAccount)
+});
+}
+
+db = admin.firestore();  
+console.log('✅ Firestore activé');
+
+} else {
+console.warn('⚠️ Clé Firebase non trouvée : mémoire désactivée');
+}
+} catch (error) {
+console.error('❌ Firebase :', error.message);
+}
+
+// ============================================================
+// PROMPT SYSTEME
+// ============================================================
 
 const SYSTEM_PROMPT = `
-Tu es ${BOT_NAME}, un assistant WhatsApp intelligent, chaleureux,
-cultivé, drôle et bienveillant.
+Tu es Hbot2, un assistant intelligent utilisé sur WhatsApp.
 
-Tu es proche des jeunes, comme un grand frère, mais tu n'assumes
-jamais le genre d'une personne si tu ne le connais pas.
+IDENTITÉ
+Ton créateur est ${CREATOR_NAME}.
+Si on te demande qui tu es ou qui t'a créé, réponds clairement :
+"Je suis Hbot2, créé et développé par ${CREATOR_NAME}."
+Tu es un programme informatique, pas un être humain.
 
-Tu réponds principalement en français simple, naturellement,
-sans être robotique ni trop long. Tu comprends les fautes,
-les abréviations et les messages courts. Utilise les emojis
-avec modération.
+PERSONNALITÉ
+Sois chaleureux, naturel, cultivé, respectueux et utile.
+Utilise un français simple par défaut.
+Comprends les fautes de frappe et les messages courts.
+Évite les réponses inutilement longues.
+N'invente pas le genre d'une personne.
 
-Tu aides pour les études, la technologie, les téléphones Android,
-les PC, JavaScript, Node.js, Firebase, WhatsApp et l'automatisation.
+CAPACITÉS
+Aide en informatique, sciences, histoire, géographie,
+mathématiques, rédaction, traduction, études et vie quotidienne.
+Réponds aux questions générales avec précision.
 
-Tu peux aider à comprendre la Bible avec respect, sans faire de
-longs sermons non sollicités. Pour les blagues, reste propre
-et bienveillant.
+ACTUALITÉ
+Utilise les résultats Internet fournis lorsqu'ils sont disponibles.
+Ne prétends pas avoir vérifié une information récente si aucune
+recherche n'a été effectuée. Distingue les faits des incertitudes.
 
-Tu as été créé et développé par ${CREATOR_NAME}.
-Si on te demande qui t'a créé, réponds clairement :
-« J'ai été créé et développé par ${CREATOR_NAME}. »
+MÉMOIRE DES GROUPES
+Les informations sous "MÉMOIRE DU GROUPE" appartiennent au groupe
+dans lequel la question est posée.
+Utilise-les pour retrouver les cotisations, montants, programmes,
+sorties, voyages, réunions, dates, heures, lieux et décisions.
+N'invente jamais une information absente.
+Si des informations se contredisent, signale-le.
+Ne révèle pas la mémoire d'un autre groupe.
 
-Utilise les résultats de recherche fournis lorsqu'ils existent.
-Ne prétends pas avoir consulté Internet si aucun résultat n'est fourni.
-Distingue les faits sûrs des incertitudes.
-
-Ne prétends pas pouvoir envoyer un message ou effectuer une action
-externe si tu ne l'as pas réellement faite.
-
-La mémoire fournie peut contenir des informations du groupe :
-utilise-les seulement si elles sont pertinentes et ne révèle pas
-de secrets ou de données personnelles sensibles.
+COMPORTEMENT
+Réponds par écrit aux messages écrits.
+Pour les messages vocaux, réponds vocalement si le service vocal
+est disponible ; sinon, réponds par écrit.
+Ne répète pas inutilement la transcription du message vocal.
+N'envoie aucun rappel automatique de cotisation, méditation,
+veillée ou programme.
+Les informations mémorisées doivent être rappelées sur demande.
 `;
 
 // ============================================================
-// FIREBASE
+// IDENTIFIANT DE MÉMOIRE DU GROUPE
 // ============================================================
 
-function initFirebase() {
-  try {
-    if (admin.apps.length) {
-      db = admin.firestore();
-      firebaseReady = true;
-      return;
-    }
-
-    if (!existsSync(FIREBASE_SERVICE_ACCOUNT)) {
-      firebaseError =
-        `Fichier Firebase absent : ${FIREBASE_SERVICE_ACCOUNT}`;
-
-      console.warn('[Firebase]', firebaseError);
-      return;
-    }
-
-    const serviceAccount = JSON.parse(
-      readFileSync(FIREBASE_SERVICE_ACCOUNT, 'utf8')
-    );
-
-    admin.initializeApp({
-      credential: admin.credential.cert(serviceAccount)
-    });
-
-    db = admin.firestore();
-    firebaseReady = true;
-
-    console.log('[Firebase] Connecté à Firestore.');
-  } catch (error) {
-    firebaseError = error?.message || String(error);
-    console.error('[Firebase] Initialisation impossible:', firebaseError);
-  }
+function getMemoryCollectionId(jid) {
+return Buffer.from(jid).toString('base64url');
 }
 
-initFirebase();
-
-function memoryCollection(jid) {
-  const safeId = Buffer.from(jid)
-    .toString('base64url')
-    .slice(0, 120);
-
-  return db
-    .collection('hbot2_group_memory')
-    .doc(safeId)
-    .collection('items');
-}
-
-async function getGroupMemory(jid) {
-  if (!firebaseReady || !db || !jid) return [];
-
-  try {
-    const snap = await memoryCollection(jid)
-      .orderBy('createdAt', 'desc')
-      .limit(MAX_MEMORY_ITEMS)
-      .get();
-
-    return snap.docs
-      .map(doc => ({ id: doc.id, ...doc.data() }))
-      .reverse();
-  } catch (error) {
-    console.error('[Mémoire] Lecture impossible:', error.message);
-    return [];
-  }
-}
-
-async function shouldRemember(text) {
-  if (!groq || !text || text.length < 8) return false;
-
-  try {
-    const result = await groq.chat.completions.create({
-      model: GROQ_MODEL,
-      temperature: 0,
-      max_tokens: 80,
-      messages: [
-        {
-          role: 'system',
-          content:
-            'Décide si le message contient une information utile et durable ' +
-            'pour la mémoire d’un groupe : rendez-vous, décision, événement, ' +
-            'tâche, préférence collective ou information importante. ' +
-            'Réponds uniquement OUI ou NON. Ne mémorise pas les salutations, ' +
-            'plaisanteries ordinaires, mots de passe, numéros privés ou ' +
-            'données sensibles.'
-        },
-        { role: 'user', content: text }
-      ]
-    });
-
-    return /^oui\b/i.test(
-      result.choices?.[0]?.message?.content?.trim() || ''
-    );
-  } catch (error) {
-    console.error('[Mémoire] Analyse impossible:', error.message);
-    return false;
-  }
-}
-
-async function saveMemory(jid, text, author) {
-  if (!firebaseReady || !db || !jid || !text) return false;
-
-  try {
-    const collection = memoryCollection(jid);
-
-    const recent = await collection
-      .orderBy('createdAt', 'desc')
-      .limit(8)
-      .get();
-
-    const normalizedText = text.trim().toLowerCase();
-
-    if (
-      recent.docs.some(
-        doc =>
-          (doc.data().text || '').trim().toLowerCase() === normalizedText
-      )
-    ) {
-      return false;
-    }
-
-    await collection.add({
-      text: text.slice(0, 1500),
-      author: (author || 'Membre').slice(0, 100),
-      createdAt: admin.firestore.FieldValue.serverTimestamp(),
-      createdAtISO: new Date().toISOString()
-    });
-
-    const all = await collection
-      .orderBy('createdAt', 'desc')
-      .limit(300)
-      .get();
-
-    if (all.size > MAX_MEMORY_ITEMS) {
-      const stale = all.docs.slice(MAX_MEMORY_ITEMS);
-      const batch = db.batch();
-
-      stale.forEach(doc => batch.delete(doc.ref));
-
-      await batch.commit();
-    }
-
-    return true;
-  } catch (error) {
-    console.error('[Mémoire] Enregistrement impossible:', error.message);
-    return false;
-  }
+function isGroupJid(jid) {
+return typeof jid === 'string' && jid.endsWith('@g.us');
 }
 
 // ============================================================
-// RECHERCHE INTERNET AVEC TAVILY
+// DÉTECTER LES INFORMATIONS IMPORTANTES
 // ============================================================
 
-function isCurrentInfoQuestion(text) {
-  return /\b(aujourd'hui|actuellement|maintenant|dernier|dernière|récent|récente|actualité|actualités|résultat|résultats|score|match|météo|prix actuel|date de|quand sort|en ce moment|cette semaine|202[5-9]|2030)\b/i.test(
-    text
-  );
-}
+function messageSembleImportant(text) {
+const contenu = String(text || '').toLowerCase();
 
-async function searchWeb(query) {
-  if (!TAVILY_API_KEY || !query || !isCurrentInfoQuestion(query)) {
-    return '';
-  }
+const mots = [
+'cotisation', 'cotisé', 'cotiser', 'fcfa', 'franc',
+'prix', 'montant', 'payer', 'paiement', 'argent',
+'sortie', 'voyage', 'déplacement', 'excursion',
+'programme', 'réunion', 'rendez-vous', 'rdv',
+'demain', "aujourd'hui", 'aujourd’hui',
+'samedi', 'dimanche', 'lundi', 'mardi', 'mercredi',
+'jeudi', 'vendredi', 'janvier', 'février', 'mars',
+'avril', 'mai', 'juin', 'juillet', 'août',
+'septembre', 'octobre', 'novembre', 'décembre',
+'heure', 'lieu', 'adresse', 'important', 'annonce',
+'décision', 'décidé', 'confirmé', 'confirmation',
+'activité', 'événement', 'date', 'répétition'
+];
 
-  try {
-    const response = await fetch('https://api.tavily.com/search', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        api_key: TAVILY_API_KEY,
-        query,
-        search_depth: 'basic',
-        max_results: 5,
-        include_answer: true
-      })
-    });
-
-    if (!response.ok) {
-      throw new Error(`Tavily HTTP ${response.status}`);
-    }
-
-    const data = await response.json();
-    const lines = [];
-
-    if (data.answer) {
-      lines.push(`Résumé du moteur de recherche : ${data.answer}`);
-    }
-
-    for (const item of (data.results || []).slice(0, 5)) {
-      lines.push(
-        `- ${item.title || 'Source'}: ${item.content || ''}` +
-        `${item.url ? ` (${item.url})` : ''}`
-      );
-    }
-
-    return lines.join('\n').slice(0, 7000);
-  } catch (error) {
-    console.error('[Web] Recherche impossible:', error.message);
-    return '';
-  }
+return mots.some(mot => contenu.includes(mot));
 }
 
 // ============================================================
-// INTELLIGENCE ARTIFICIELLE ET HISTORIQUE
+// ENREGISTRER UNE INFORMATION DU GROUPE
 // ============================================================
 
-function conversationKey(jid, sender) {
-  // Les membres partagent le contexte temporaire du groupe.
-  // Les conversations privées restent séparées par contact.
-  return jid.endsWith('@g.us') ? jid : `${jid}:${sender || 'unknown'}`;
+async function memoriserGroupe(jid, information, auteur = '') {
+if (!db || !isGroupJid(jid) || !information) return;
+
+try {
+const collectionId = getMemoryCollectionId(jid);
+
+await db  
+  .collection('hbot2_group_memory')  
+  .doc(collectionId)  
+  .collection('items')  
+  .add({  
+    texte: String(information).slice(0, 5000),  
+    auteur: String(auteur || 'membre').slice(0, 200),  
+    date: admin.firestore.FieldValue.serverTimestamp(),  
+    dateISO: new Date().toISOString()  
+  });  
+
+console.log(`🧠 Information mémorisée pour ${jid}`);
+
+} catch (error) {
+console.error('❌ Mémoire Firestore :', error.message);
+}
 }
 
-function getHistory(key) {
-  if (!conversations.has(key)) {
-    if (conversations.size >= MAX_CONVERSATIONS) {
-      const oldestKey = conversations.keys().next().value;
-      if (oldestKey) conversations.delete(oldestKey);
-    }
+// ============================================================
+// LIRE LA MÉMOIRE DU GROUPE
+// ============================================================
 
-    conversations.set(key, []);
-  }
+async function recupererMemoireGroupe(jid, limite = MAX_GROUP_MEMORY) {
+if (!db || !isGroupJid(jid)) return [];
 
-  return conversations.get(key);
+try {
+const collectionId = getMemoryCollectionId(jid);
+
+const snapshot = await db  
+  .collection('hbot2_group_memory')  
+  .doc(collectionId)  
+  .collection('items')  
+  .orderBy('dateISO', 'desc')  
+  .limit(limite)  
+  .get();  
+
+return snapshot.docs  
+  .map(doc => doc.data())  
+  .reverse();
+
+} catch (error) {
+console.error('❌ Lecture mémoire :', error.message);
+return [];
+}
 }
 
-async function genererIA(
-  jid,
-  sender,
-  question,
-  groupMemory = [],
-  webData = ''
+// ============================================================
+// ANALYSER SI UNE INFORMATION DOIT ÊTRE MÉMORISÉE
+// ============================================================
+
+async function analyserInformation(text) {
+if (!groq || !messageSembleImportant(text)) return false;
+
+try {
+const result = await groq.chat.completions.create({
+model: GROQ_MODEL,
+messages: [
+{
+role: 'system',
+content: Réponds uniquement OUI ou NON.   OUI si le message contient une information pratique que le   groupe pourrait vouloir retrouver plus tard : cotisation,   argent, date, heure, lieu, sortie, voyage, programme, réunion,   annonce, décision ou événement.   NON pour les conversations ordinaires, salutations et plaisanteries.
+},
+{ role: 'user', content: String(text).slice(0, 4000) }
+],
+temperature: 0,
+max_tokens: 5
+});
+
+return result.choices?.[0]?.message?.content  
+  ?.trim().toUpperCase().startsWith('OUI') || false;
+
+} catch (error) {
+console.error('❌ Analyse mémoire :', error.message);
+return false;
+}
+}
+
+// ============================================================
+// RECHERCHE INTERNET TAVILY
+// ============================================================
+
+function questionSembleActuelle(text) {
+const contenu = String(text || '').toLowerCase();
+
+const mots = [
+"aujourd'hui", 'aujourd’hui', 'maintenant',
+'actuellement', 'ce soir', 'demain', 'hier',
+'cette semaine', 'cette année', 'actualité',
+'actualités', 'dernières nouvelles', 'news',
+'récent', 'récente', 'dernier', 'dernière',
+'score', 'résultat', 'match', 'météo',
+'prix actuel', 'cours actuel', 'président actuel',
+'premier ministre', 'horaires', 'ouvert maintenant'
+];
+
+return mots.some(mot => contenu.includes(mot));
+}
+
+async function questionNecessiteWeb(text) {
+if (questionSembleActuelle(text)) return true;
+if (!groq) return false;
+
+try {
+const result = await groq.chat.completions.create({
+model: GROQ_MODEL,
+messages: [
+{
+role: 'system',
+content: Réponds uniquement OUI ou NON.   OUI si la question nécessite des informations récentes ou   susceptibles d'avoir changé : actualités, sport, météo, prix,   événements récents, fonctions officielles ou horaires.   NON pour les connaissances générales stables.
+},
+{ role: 'user', content: String(text).slice(0, 3000) }
+],
+temperature: 0,
+max_tokens: 5
+});
+
+return result.choices?.[0]?.message?.content  
+  ?.trim().toUpperCase().startsWith('OUI') || false;
+
+} catch {
+return false;
+}
+}
+
+async function rechercherInternet(query) {
+if (!TAVILY_API_KEY) return null;
+
+try {
+const response = await fetch('https://api.tavily.com/search', {
+method: 'POST',
+headers: { 'Content-Type': 'application/json' },
+body: JSON.stringify({
+api_key: TAVILY_API_KEY,
+query,
+search_depth: 'advanced',
+topic: 'general',
+max_results: 5,
+include_answer: true,
+include_raw_content: false
+}),
+signal: AbortSignal.timeout(25000)
+});
+
+if (!response.ok) {  
+  throw new Error(`Tavily HTTP ${response.status}`);  
+}  
+
+const data = await response.json();  
+
+return {  
+  answer: data.answer || '',  
+  results: (data.results || []).map(item => ({  
+    title: item.title || '',  
+    url: item.url || '',  
+    content: item.content || ''  
+  }))  
+};
+
+} catch (error) {
+console.error('❌ Recherche Web :', error.message);
+return null;
+}
+}
+
+// ============================================================
+// TRANSCRIPTION VOCALE GROQ / WHISPER
+// ============================================================
+
+async function transcrireAudio(audioBuffer, mimetype = 'audio/ogg') {
+if (!groq) return '';
+
+try {
+let extension = 'ogg';
+
+if (/mp3|mpeg/i.test(mimetype)) extension = 'mp3';  
+else if (/m4a|mp4/i.test(mimetype)) extension = 'm4a';  
+else if (/webm/i.test(mimetype)) extension = 'webm';  
+else if (/wav/i.test(mimetype)) extension = 'wav';  
+
+const file = await toFile(audioBuffer, `hbot2.${extension}`);  
+
+const result = await groq.audio.transcriptions.create({  
+  file,  
+  model: WHISPER_MODEL,  
+  language: WHISPER_LANGUAGE,  
+  response_format: 'json',  
+  temperature: 0  
+});  
+
+return result.text?.trim() || '';
+
+} catch (error) {
+console.error('❌ Transcription Whisper :', error.message);
+return '';
+}
+}
+
+// ============================================================
+// PRÉPARER LE TEXTE POUR LA VOIX
+// ============================================================
+
+function nettoyerTexteVocal(text) {
+return String(text || '')
+.replace(/\((.?\)/g, '$1')
+.replace(/[*_~`#]/g, '')
+.replace(/https?://\S+/g, '')
+.replace(/[\u{1F300}-\u{1FAFF}]/gu, '')
+.trim()
+.slice(0, 1800);
+}
+
+// ============================================================
+// CONVERTIR MP3 EN OGG OPUS POUR WHATSAPP
+// ============================================================
+
+async function convertirEnOpus(mp3Buffer) {
+if (!ffmpegPath) {
+throw new Error('ffmpeg-static indisponible');
+}
+
+const proc = spawn(ffmpegPath, [
+'-hide_banner',
+'-loglevel', 'error',
+'-i', 'pipe:0',
+'-vn',
+'-c:a', 'libopus',
+'-b:a', '32k',
+'-ar', '48000',
+'-ac', '1',
+'-f', 'ogg',
+'pipe:1'
+], { stdio: ['pipe', 'pipe', 'pipe'] });
+
+const output = [];
+const errors = [];
+
+proc.stdout.on('data', chunk => output.push(chunk));
+proc.stderr.on('data', chunk => errors.push(chunk));
+
+proc.stdin.end(mp3Buffer);
+
+const [code] = await once(proc, 'close');
+
+if (code !== 0) {
+throw new Error(Buffer.concat(errors).toString().slice(0, 500));
+}
+
+return Buffer.concat(output);
+}
+
+// ============================================================
+// GÉNÉRER ET ENVOYER UNE RÉPONSE VOCALE
+// ============================================================
+
+async function envoyerVocal(jid, text, quoted) {
+if (
+!sockInstance ||
+!VOICE_REPLY_ENABLED ||
+!ELEVENLABS_API_KEY ||
+!ELEVENLABS_VOICE_ID
 ) {
-  if (!groq) {
-    return 'Mon intelligence artificielle n’est pas configurée. ' +
-      'Ajoute la variable GROQ_API_KEY dans Render.';
-  }
+return false;
+}
 
-  const key = conversationKey(jid, sender);
-  const history = getHistory(key);
+try {
+const cleanText = nettoyerTexteVocal(text);
+if (!cleanText) return false;
 
-  const memoryText = groupMemory.length
-    ? groupMemory
-        .map(
-          item =>
-            `• ${item.text}${item.author ? ` (par ${item.author})` : ''}`
-        )
-        .join('\n')
-    : 'Aucune mémoire de groupe enregistrée.';
+const response = await fetch(  
+  `https://api.elevenlabs.io/v1/text-to-speech/${encodeURIComponent(ELEVENLABS_VOICE_ID)}?output_format=mp3_22050_32`,  
+  {  
+    method: 'POST',  
+    headers: {  
+      'xi-api-key': ELEVENLABS_API_KEY,  
+      'Content-Type': 'application/json',  
+      'Accept': 'audio/mpeg'  
+    },  
+    body: JSON.stringify({  
+      text: cleanText,  
+      model_id: ELEVENLABS_MODEL  
+    }),  
+    signal: AbortSignal.timeout(60000)  
+  }  
+);  
 
-  const additions =
-    `\n\nMémoire du groupe (à utiliser uniquement si utile) :\n${memoryText}` +
-    (webData ? `\n\nRésultats de recherche Internet :\n${webData}` : '');
+if (!response.ok) {  
+  throw new Error(`ElevenLabs HTTP ${response.status}`);  
+}  
 
-  const messages = [
-    { role: 'system', content: SYSTEM_PROMPT + additions },
-    ...history,
-    { role: 'user', content: question }
-  ];
+const mp3 = Buffer.from(await response.arrayBuffer());  
+const opus = await convertirEnOpus(mp3);  
 
-  try {
-    const response = await groq.chat.completions.create({
-      model: GROQ_MODEL,
-      temperature: 0.65,
-      max_tokens: 900,
-      messages
-    });
+await sockInstance.sendMessage(  
+  jid,  
+  {  
+    audio: opus,  
+    mimetype: 'audio/ogg; codecs=opus',  
+    ptt: true  
+  },  
+  { quoted }  
+);  
 
-    const answer =
-      response.choices?.[0]?.message?.content?.trim() ||
-      'Désolé, je n’ai pas réussi à formuler une réponse.';
+return true;
 
-    history.push(
-      { role: 'user', content: question.slice(0, 4000) },
-      { role: 'assistant', content: answer.slice(0, 4000) }
-    );
-
-    // Conserver des paires question/réponse complètes.
-    while (history.length > MAX_HISTORY) {
-      history.splice(0, 2);
-    }
-
-    return answer;
-  } catch (error) {
-    console.error('[Groq] Réponse impossible:', error.message);
-
-    return 'Désolé, j’ai un souci temporaire avec mon intelligence ' +
-      'artificielle. Réessaie dans un instant.';
-  }
+} catch (error) {
+console.error('❌ Réponse vocale :', error.message);
+return false;
+}
 }
 
 // ============================================================
-// AUDIO : TRANSCRIPTION ET RÉPONSE VOCALE
+// GÉNÉRER LA RÉPONSE IA
 // ============================================================
 
-async function transcrireAudio(buffer, mimetype = 'audio/ogg') {
-  if (!groq) {
-    throw new Error('GROQ_API_KEY absent : transcription vocale indisponible.');
-  }
-
-  const file = await toFile(buffer, 'message-audio.ogg', {
-    type: mimetype || 'audio/ogg'
-  });
-
-  const result = await groq.audio.transcriptions.create({
-    file,
-    model: GROQ_AUDIO_MODEL,
-    language: AUDIO_LANGUAGE,
-    response_format: 'text'
-  });
-
-  return (typeof result === 'string' ? result : result.text || '').trim();
+async function genererIA(jid, question, groupMemory = [], webData = null) {
+if (!groq) {
+return '⚠️ Le service IA Groq n’est pas configuré.';
 }
 
-async function genererAudio(text) {
-  if (
-    !VOICE_REPLY_ENABLED ||
-    !ELEVENLABS_API_KEY ||
-    !ELEVENLABS_VOICE_ID ||
-    !ffmpegPath
-  ) {
-    return null;
-  }
-
-  const mp3Path = path.join(os.tmpdir(), `hbot2-${randomUUID()}.mp3`);
-  const oggPath = path.join(os.tmpdir(), `hbot2-${randomUUID()}.ogg`);
-
-  try {
-    const response = await fetch(
-      `https://api.elevenlabs.io/v1/text-to-speech/${encodeURIComponent(ELEVENLABS_VOICE_ID)}/with-timestamps`,
-      {
-        method: 'POST',
-        headers: {
-          'xi-api-key': ELEVENLABS_API_KEY,
-          'Content-Type': 'application/json',
-          Accept: 'application/json'
-        },
-        body: JSON.stringify({
-          text: text.slice(0, 2500),
-          model_id: ELEVENLABS_MODEL,
-          voice_settings: {
-            stability: 0.45,
-            similarity_boost: 0.75
-          }
-        })
-      }
-    );
-
-    if (!response.ok) {
-      throw new Error(
-        `ElevenLabs HTTP ${response.status}: ` +
-        (await response.text()).slice(0, 300)
-      );
-    }
-
-    const data = await response.json();
-
-    if (!data.audio_base64) {
-      throw new Error('Audio ElevenLabs absent dans la réponse.');
-    }
-
-    await writeFile(mp3Path, Buffer.from(data.audio_base64, 'base64'));
-
-    await new Promise((resolve, reject) => {
-      const proc = spawn(
-        ffmpegPath,
-        [
-          '-y',
-          '-i', mp3Path,
-          '-vn',
-          '-ac', '1',
-          '-ar', '48000',
-          '-c:a', 'libopus',
-          '-b:a', '32k',
-          '-application', 'voip',
-          oggPath
-        ],
-        { stdio: ['ignore', 'ignore', 'pipe'] }
-      );
-
-      let stderr = '';
-
-      proc.stderr.on('data', chunk => {
-        stderr += chunk.toString();
-      });
-
-      proc.on('error', reject);
-
-      proc.on('close', code => {
-        if (code === 0) {
-          resolve();
-        } else {
-          reject(
-            new Error(`FFmpeg code ${code}: ${stderr.slice(-500)}`)
-          );
-        }
-      });
-    });
-
-    return await readFile(oggPath);
-  } catch (error) {
-    console.error('[Voix] Synthèse audio impossible:', error.message);
-    return null;
-  } finally {
-    await Promise.all([
-      unlink(mp3Path).catch(() => {}),
-      unlink(oggPath).catch(() => {})
-    ]);
-  }
+if (!conversations.has(jid)) {
+conversations.set(jid, []);
 }
 
-async function envoyerReponse(
-  jid,
-  text,
-  isVoice = false,
-  quotedMessage = null
-) {
-  if (!sock) return;
+const history = conversations.get(jid);
 
-  if (isVoice && VOICE_REPLY_ENABLED) {
-    const audio = await genererAudio(text);
+const memoryText = groupMemory.length
+? groupMemory.map(item =>
+- ${item.texte} (source : ${item.auteur || 'membre'}, date : ${item.dateISO || 'inconnue'})
+).join('\n')
+: 'Aucune information mémorisée pour ce groupe.';
 
-    if (audio) {
-      try {
-        await sock.sendMessage(
-          jid,
-          {
-            audio,
-            mimetype: 'audio/ogg; codecs=opus',
-            ptt: true
-          },
-          quotedMessage ? { quoted: quotedMessage } : {}
-        );
+let webText = 'Aucune recherche Internet effectuée.';
 
-        return;
-      } catch (error) {
-        console.error('[WhatsApp] Envoi vocal impossible:', error.message);
-      }
-    }
-  }
+if (webData) {
+webText = Résumé : ${webData.answer || 'Aucun résumé disponible.'}\n;
 
-  await sock.sendMessage(
-    jid,
-    { text },
-    quotedMessage ? { quoted: quotedMessage } : {}
-  );
+for (const item of webData.results || []) {  
+  webText += `\nTitre : ${item.title}\nURL : ${item.url}\nContenu : ${item.content}\n`;  
+}
+
+}
+
+const context = `
+MÉMOIRE DU GROUPE :
+${memoryText}
+
+RÉSULTATS INTERNET :
+${webText}
+
+QUESTION DE L'UTILISATEUR :
+${question}
+
+Réponds directement à la question. Ne présente pas les résultats
+de transcription comme une réponse. N'invente aucun fait.
+`;
+
+const messages = [
+{ role: 'system', content: SYSTEM_PROMPT },
+...history,
+{ role: 'user', content: context }
+];
+
+try {
+const completion = await groq.chat.completions.create({
+model: GROQ_MODEL,
+messages,
+temperature: 0.6,
+max_tokens: 1200
+});
+
+const answer = completion.choices?.[0]?.message?.content?.trim();  
+
+if (!answer) {  
+  return 'Je n’ai pas réussi à formuler une réponse.';  
+}  
+
+history.push(  
+  { role: 'user', content: question },  
+  { role: 'assistant', content: answer }  
+);  
+
+while (history.length > MAX_HISTORY) {  
+  history.shift();  
+}  
+
+while (conversations.size > MAX_CONVERSATIONS) {  
+  conversations.delete(conversations.keys().next().value);  
+}  
+
+return answer;
+
+} catch (error) {
+console.error('❌ Groq IA :', error.message);
+return '⚠️ Je rencontre actuellement un problème avec mon intelligence artificielle.';
+}
 }
 
 // ============================================================
-// LECTURE DES MESSAGES WHATSAPP
+// EXTRAIRE LE TEXTE DU MESSAGE
 // ============================================================
 
-function getMessageContent(message) {
-  let content = message?.message;
+function extraireTexte(msg) {
+const message = msg?.message;
+if (!message) return '';
 
-  while (
-    content?.ephemeralMessage?.message ||
-    content?.viewOnceMessage?.message ||
-    content?.viewOnceMessageV2?.message
-  ) {
-    content =
-      content.ephemeralMessage?.message ||
-      content.viewOnceMessage?.message ||
-      content.viewOnceMessageV2?.message;
-  }
+const contenu =
+message.ephemeralMessage?.message ||
+message.viewOnceMessage?.message ||
+message.viewOnceMessageV2?.message ||
+message;
 
-  return content || {};
+return (
+contenu.conversation ||
+contenu.extendedTextMessage?.text ||
+contenu.imageMessage?.caption ||
+contenu.videoMessage?.caption ||
+contenu.documentMessage?.caption ||
+contenu.buttonsResponseMessage?.selectedDisplayText ||
+contenu.listResponseMessage?.title ||
+''
+);
 }
 
-function extraireTexte(message) {
-  const content = getMessageContent(message);
+function extraireAudio(msg) {
+const message = msg?.message;
+if (!message) return null;
 
-  return (
-    content.conversation ||
-    content.extendedTextMessage?.text ||
-    content.imageMessage?.caption ||
-    content.videoMessage?.caption ||
-    content.documentMessage?.caption ||
-    content.buttonsResponseMessage?.selectedDisplayText ||
-    content.listResponseMessage?.title ||
-    content.templateButtonReplyMessage?.selectedDisplayText ||
-    ''
-  );
+const contenu =
+message.ephemeralMessage?.message ||
+message.viewOnceMessage?.message ||
+message.viewOnceMessageV2?.message ||
+message;
+
+if (contenu.audioMessage) return contenu.audioMessage;
+
+return null;
 }
 
-function extraireAudio(message) {
-  const content = getMessageContent(message);
-
-  if (content.audioMessage) {
-    return {
-      audio: content.audioMessage,
-      ptt: Boolean(content.audioMessage.ptt)
-    };
-  }
-
-  if (
-    content.documentMessage &&
-    /audio|ogg|mpeg|mp4/i.test(content.documentMessage.mimetype || '')
-  ) {
-    return {
-      audio: content.documentMessage,
-      ptt: false
-    };
-  }
-
-  return null;
+function getAuthorName(msg) {
+return msg.pushName || msg.key?.participant || 'membre';
 }
 
-function getAuthorName(message) {
-  return message.pushName || message.verifiedBizName || 'Membre';
-}
-
-function hbot2EstMentionne(message, text) {
-  const content = getMessageContent(message);
-
-  const context =
-    content.extendedTextMessage?.contextInfo ||
-    content.imageMessage?.contextInfo ||
-    content.videoMessage?.contextInfo ||
-    content.audioMessage?.contextInfo ||
-    {};
-
-  const botId = sock?.user?.id?.split(':')[0];
-
-  if (
-    botId &&
-    Array.isArray(context.mentionedJid) &&
-    context.mentionedJid.some(jid => jid.split('@')[0].split(':')[0] === botId)
-  ) {
-    return true;
-  }
-
-  return /\bhbot\s*2\b|\bhbot2\b/i.test(text || '');
+function hbot2EstMentionne(text) {
+return /\bhbot2\b/i.test(String(text || ''));
 }
 
 function nettoyerQuestion(text) {
-  return (text || '')
-    .replace(/@\d{5,}/g, '')
-    .replace(/\bhbot\s*2\b|\bhbot2\b/ig, '')
-    .trim();
+return String(text || '')
+.replace(/\bhbot2\b/gi, '')
+.replace(/^[\s,;:!?-]+/, '')
+.trim();
 }
 
 // ============================================================
-// COMMANDES
+// ENVOYER UNE RÉPONSE
 // ============================================================
 
-async function traiterCommande(jid, text, message, isGroup, sender) {
-  const cmd = text.trim().split(/\s+/)[0].toLowerCase();
+async function envoyerReponse(jid, text, quoted, isVoice = false) {
+if (isVoice) {
+const sent = await envoyerVocal(jid, text, quoted);
+if (sent) return;
+}
 
-  const commandes = [
-    '!help',
-    '!aide',
-    '!id',
-    '!createur',
-    '!hbot2',
-    '!resetia',
-    '!memoire'
-  ];
-
-  if (!commandes.includes(cmd)) return false;
-
-  if (cmd === '!help' || cmd === '!aide') {
-    await envoyerReponse(
-      jid,
-      `🤖 *Commandes ${BOT_NAME}*\n` +
-      '!help ou !aide — afficher l’aide\n' +
-      '!hbot2 — me présenter\n' +
-      '!createur — connaître mon créateur\n' +
-      '!id — afficher l’identifiant du chat\n' +
-      '!resetia — réinitialiser le contexte IA\n' +
-      '!memoire — afficher la mémoire du groupe\n\n' +
-      `Dans un groupe, mentionne @${BOT_NAME} pour poser une question. ` +
-      'Les commandes fonctionnent sans mention.',
-      false,
-      message
-    );
-  } else if (cmd === '!id') {
-    await envoyerReponse(
-      jid,
-      `Identifiant de ce chat :\n${jid}\n` +
-      `${isGroup ? `Expéditeur : ${sender}` : ''}`,
-      false,
-      message
-    );
-  } else if (cmd === '!createur') {
-    await envoyerReponse(
-      jid,
-      `J'ai été créé et développé par ${CREATOR_NAME}.`,
-      false,
-      message
-    );
-  } else if (cmd === '!hbot2') {
-    await envoyerReponse(
-      jid,
-      `Salut ! Moi, c’est ${BOT_NAME} 🤖 ` +
-      'Je suis un assistant intelligent, chaleureux et bienveillant. ' +
-      `Mon créateur est ${CREATOR_NAME}.`,
-      false,
-      message
-    );
-  } else if (cmd === '!resetia') {
-    conversations.delete(conversationKey(jid, sender));
-
-    await envoyerReponse(
-      jid,
-      'C’est fait : le contexte récent de cette conversation a été réinitialisé.',
-      false,
-      message
-    );
-  } else if (cmd === '!memoire') {
-    if (!isGroup) {
-      await envoyerReponse(
-        jid,
-        'La mémoire persistante est prévue pour les groupes WhatsApp.',
-        false,
-        message
-      );
-    } else {
-      const memory = await getGroupMemory(jid);
-
-      const output = memory.length
-        ? memory
-            .slice(-20)
-            .map((item, index) => `${index + 1}. ${item.text}`)
-            .join('\n')
-        : 'Aucune information enregistrée pour le moment.';
-
-      await envoyerReponse(
-        jid,
-        `🧠 *Mémoire du groupe*\n${output}`.slice(0, 6000),
-        false,
-        message
-      );
-    }
-  }
-
-  return true;
+await sockInstance.sendMessage(
+jid,
+{ text },
+{ quoted }
+);
 }
 
 // ============================================================
-// ANTI-DOUBLONS ET TRAITEMENT DES MESSAGES
+// COMMANDES WHATSAPP
 // ============================================================
 
-function markMessageProcessed(id) {
-  if (!id) return;
+async function traiterCommande(jid, text, quoted, isVoice = false) {
+const command = String(text || '').trim().toLowerCase();
 
-  processedMessages.add(id);
-  processedOrder.push(id);
+if (['!help', '!aide'].includes(command)) {
+await envoyerReponse(jid,
+`🤖 HBOT2 — AIDE
 
-  while (processedOrder.length > MAX_PROCESSED_IDS) {
-    const old = processedOrder.shift();
-    processedMessages.delete(old);
-  }
+!help — Afficher l'aide
+!aide — Afficher l'aide
+!id — Afficher l'identifiant du chat
+!createur — Connaître mon créateur
+!hbot2 — Présenter Hbot2
+!resetia — Réinitialiser la conversation IA
+!memoire — Consulter les informations mémorisées du groupe
+
+Dans un groupe, écris "Hbot2" suivi de ta question.
+
+🧠 Je mémorise les informations importantes du groupe.
+🎙️ Je comprends les messages vocaux.
+🌐 Je peux rechercher des informations actuelles.
+🔊 Je peux répondre vocalement si le service est configuré.`,
+quoted, isVoice);
+return true;
 }
 
-async function traiterMessage(message) {
-  const jid = message.key?.remoteJid;
-  const messageId = message.key?.id;
+if (command === '!id') {
+await envoyerReponse(jid, 🆔 Identifiant du chat :\n${jid}, quoted, isVoice);
+return true;
+}
 
-  if (
-    !jid ||
-    !messageId ||
-    jid === 'status@broadcast' ||
-    message.key?.fromMe
-  ) {
-    return;
-  }
+if (['!createur', '!hbot2'].includes(command)) {
+await envoyerReponse(
+jid,
+🤖 Je suis Hbot2.\n👤 J'ai été créé et développé par ${CREATOR_NAME}.,
+quoted,
+isVoice
+);
+return true;
+}
 
-  if (
-    processedMessages.has(messageId) ||
-    processingMessages.has(messageId)
-  ) {
-    return;
-  }
+if (command === '!resetia') {
+conversations.delete(jid);
+await envoyerReponse(
+jid,
+'🧹 La conversation temporaire avec l’IA a été réinitialisée.',
+quoted,
+isVoice
+);
+return true;
+}
 
-  processingMessages.add(messageId);
+if (command === '!memoire') {
+if (!isGroupJid(jid)) {
+await envoyerReponse(
+jid,
+'Cette commande concerne la mémoire des groupes WhatsApp.',
+quoted,
+isVoice
+);
+return true;
+}
 
-  try {
-    const isGroup = jid.endsWith('@g.us');
-    const sender = message.key.participant || jid;
-    const author = getAuthorName(message);
+const memory = await recupererMemoireGroupe(jid, 30);  
 
-    let text = extraireTexte(message);
-    const audioInfo = extraireAudio(message);
-    let isVoice = false;
+const response = memory.length  
+  ? '🧠 *Dernières informations mémorisées :*\n\n' +  
+    memory.map((item, i) =>  
+      `${i + 1}. ${item.texte} (${item.dateISO || 'date inconnue'})`  
+    ).join('\n\n')  
+  : 'Aucune information mémorisée pour ce groupe.';  
 
-    if (audioInfo) {
-      try {
-        const media = await downloadMediaMessage(
-          message,
-          'buffer',
-          {},
-          {
-            logger: pino({ level: 'silent' }),
-            reuploadRequest: sock?.updateMediaMessage
-          }
-        );
+await envoyerReponse(jid, response, quoted, isVoice);  
+return true;
 
-        const transcript = await transcrireAudio(
-          media,
-          audioInfo.audio.mimetype || 'audio/ogg'
-        );
+}
 
-        if (transcript) {
-          text = transcript;
-          isVoice = true;
-
-          console.log(`[Voix] ${author}: ${transcript.slice(0, 180)}`);
-        } else {
-          if (!isGroup || hbot2EstMentionne(message, '')) {
-            await envoyerReponse(
-              jid,
-              'Je n’ai pas réussi à comprendre le vocal. ' +
-              'Peux-tu réessayer ou écrire ton message ?',
-              false,
-              message
-            );
-          }
-
-          return;
-        }
-      } catch (error) {
-        console.error('[Voix] Transcription impossible:', error.message);
-
-        if (!isGroup || hbot2EstMentionne(message, '')) {
-          await envoyerReponse(
-            jid,
-            'Je n’arrive pas à transcrire ce vocal pour le moment. ' +
-            'Réessaie un peu plus tard.',
-            false,
-            message
-          );
-        }
-
-        return;
-      }
-    }
-
-    if (!text?.trim()) return;
-
-    text = text.trim();
-
-    // Les commandes fonctionnent même sans mention dans les groupes.
-    if (
-      text.startsWith('!') &&
-      await traiterCommande(jid, text, message, isGroup, sender)
-    ) {
-      return;
-    }
-
-    // Les messages ordinaires d'un groupe ne reçoivent pas de réponse
-    // sauf si Hbot2 est mentionné. Les informations utiles peuvent
-    // toutefois être enregistrées dans la mémoire.
-    if (isGroup && !hbot2EstMentionne(message, text)) {
-      if (await shouldRemember(text)) {
-        const saved = await saveMemory(jid, text, author);
-
-        if (saved) {
-          console.log(
-            `[Mémoire] Information du groupe enregistrée (${author}).`
-          );
-        }
-      }
-
-      return;
-    }
-
-    const question = nettoyerQuestion(text) || text;
-
-    if (!question) {
-      await envoyerReponse(
-        jid,
-        'Oui, je t’écoute 😊 Que veux-tu savoir ?',
-        isVoice,
-        message
-      );
-
-      return;
-    }
-
-    const webData = await searchWeb(question);
-    const memory = isGroup ? await getGroupMemory(jid) : [];
-
-    const answer = await genererIA(
-      jid,
-      sender,
-      question,
-      memory,
-      webData
-    );
-
-    await envoyerReponse(jid, answer, isVoice, message);
-
-    if (isGroup && await shouldRemember(question)) {
-      await saveMemory(jid, question, author);
-    }
-  } catch (error) {
-    lastError = error?.message || String(error);
-
-    console.error('[Message] Erreur de traitement:', error);
-
-    try {
-      await envoyerReponse(
-        message.key.remoteJid,
-        'Désolé, une erreur temporaire est survenue. Réessaie dans un instant.',
-        false,
-        message
-      );
-    } catch {}
-  } finally {
-    processingMessages.delete(messageId);
-    markMessageProcessed(messageId);
-  }
+return false;
 }
 
 // ============================================================
-// PAGE WEB DE STATUT
+// TRAITER UN MESSAGE ENTRANT
 // ============================================================
 
-app.get('/health', (_req, res) => {
-  res.status(200).json({
-    ok: true,
-    bot: BOT_NAME,
-    status: connectionStatus,
-    authMode: AUTH_MODE,
-    groq: Boolean(groq),
-    firebase: firebaseReady,
-    webSearch: Boolean(TAVILY_API_KEY),
-    voiceRecognition: Boolean(groq),
-    voiceResponse: Boolean(
-      VOICE_REPLY_ENABLED &&
-      ELEVENLABS_API_KEY &&
-      ELEVENLABS_VOICE_ID &&
-      ffmpegPath
-    ),
-    lastConnectionUpdate,
-    lastError: lastError || undefined
-  });
-});
+async function traiterMessage(msg) {
+if (!msg?.message || msg.key?.fromMe) return;
+if (msg.key?.remoteJid === 'status@broadcast') return;
 
-app.get('/', async (_req, res) => {
-  let authHtml =
-    '<p class="muted">Aucun QR code disponible pour le moment.</p>';
+const jid = msg.key?.remoteJid;
+if (!jid) return;
 
-  if (AUTH_MODE === 'pairing') {
-    authHtml = pairingCode
-      ? `<div class="pairing">${escapeHtml(pairingCode)}</div>
-         <p>Sur ton téléphone : WhatsApp → Appareils connectés →
-         Connecter un appareil → Connecter avec un numéro de téléphone.
-         Saisis ensuite le code ci-dessus.</p>`
-      : '<p class="muted">En attente du code d’appairage. ' +
-        'Vérifie les journaux Render si le code ne paraît pas.</p>';
-  } else if (currentQrDataUrl) {
-    authHtml =
-      `<img class="qr" src="${currentQrDataUrl}" alt="QR code WhatsApp">`;
-  }
+// Éviter de traiter deux fois le même message.
+const messageId = msg.key?.id;
+const dedupeKey = messageId ? ${jid}:${messageId} : null;
 
-  res.type('html').send(`<!doctype html>
-<html lang="fr">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<meta http-equiv="refresh" content="10">
-<title>${escapeHtml(BOT_NAME)} — État</title>
-<style>
-body {
-  font-family: system-ui, Arial, sans-serif;
-  background: #10131a;
-  color: #f4f6fb;
-  margin: 0;
-  padding: 24px;
-}
-.card {
-  max-width: 680px;
-  margin: 0 auto;
-  background: #1b202b;
-  border: 1px solid #303849;
-  border-radius: 18px;
-  padding: 24px;
-}
-h1 { margin-top: 0; }
-.status { font-weight: 700; color: #9ff0b4; }
-.muted { color: #b9c0cf; }
-.qr {
-  display: block;
-  width: min(320px, 100%);
-  margin: 20px auto;
-  background: white;
-  padding: 10px;
-  border-radius: 12px;
-}
-.pairing {
-  font-size: 2.1rem;
-  letter-spacing: .18em;
-  font-weight: 800;
-  text-align: center;
-  padding: 28px 8px;
-  color: #a6ffb4;
-}
-.row {
-  padding: 9px 0;
-  border-bottom: 1px solid #303849;
-}
-.warning {
-  color: #ffd58a;
-  font-size: .9rem;
-  margin-top: 18px;
-}
-</style>
-</head>
-<body>
-<main class="card">
-<h1>🤖 ${escapeHtml(BOT_NAME)}</h1>
-<p>État WhatsApp :
-<span class="status">${escapeHtml(connectionStatus)}</span></p>
-<div class="row">Authentification : ${escapeHtml(AUTH_MODE)}</div>
-<div class="row">Intelligence artificielle :
-${groq ? 'Configurée' : 'GROQ_API_KEY manquante'}</div>
-<div class="row">Firebase :
-${firebaseReady ? 'Connecté' : 'Non connecté (mémoire indisponible)'}</div>
-<div class="row">Recherche web :
-${TAVILY_API_KEY ? 'Configurée' : 'Non configurée'}</div>
-<div class="row">Réponse vocale :
-${VOICE_REPLY_ENABLED && ELEVENLABS_API_KEY && ELEVENLABS_VOICE_ID
-    ? 'Configurée'
-    : 'Non configurée'}</div>
-<h2>${AUTH_MODE === 'pairing' ? 'Code d’appairage' : 'QR code WhatsApp'}</h2>
-${authHtml}
-<p class="muted">Cette page se rafraîchit toutes les 10 secondes.</p>
-<p class="warning">Sécurité : ne partage pas cette page, le QR code
-ou le code d’appairage. Ils permettent de lier ton compte WhatsApp.</p>
-</main>
-</body>
-</html>`);
-});
+if (dedupeKey && processingMessages.has(dedupeKey)) return;
 
-function escapeHtml(value) {
-  return String(value).replace(/[&<>"']/g, ch => ({
-    '&': '&amp;',
-    '<': '&lt;',
-    '>': '&gt;',
-    '"': '&quot;',
-    "'": '&#39;'
-  })[ch]);
-}
+if (dedupeKey) processingMessages.add(dedupeKey);
 
-app.listen(PORT, '0.0.0.0', () => {
-  console.log(`[Serveur] ${BOT_NAME} disponible sur le port ${PORT}.`);
-});
+try {
+const isGroup = isGroupJid(jid);
+const audioMessage = extraireAudio(msg);
+const isVoice = Boolean(audioMessage);
+
+let question = extraireTexte(msg);  
+
+// --------------------------------------------------------  
+// TRANSCRIPTION VOCALE  
+// --------------------------------------------------------  
+
+if (isVoice) {  
+  if (!groq) {  
+    await envoyerReponse(  
+      jid,  
+      '⚠️ La reconnaissance vocale est indisponible pour le moment.',  
+      msg  
+    );  
+    return;  
+  }  
+
+  try {  
+    const audioBuffer = await downloadMediaMessage(  
+      msg,  
+      'buffer',  
+      {},  
+      {  
+        logger: pino({ level: 'silent' }),  
+        reuploadRequest: sockInstance.updateMediaMessage  
+      }  
+    );  
+
+    question = await transcrireAudio(  
+      audioBuffer,  
+      audioMessage.mimetype || 'audio/ogg'  
+    );  
+
+    if (!question) {  
+      await envoyerReponse(  
+        jid,  
+        '🎙️ Je n’ai pas réussi à comprendre ton message vocal.',  
+        msg  
+      );  
+      return;  
+    }  
+
+    console.log(`🎙️ Vocal transcrit pour ${jid}`);  
+  } catch (error) {  
+    console.error('❌ Téléchargement vocal :', error.message);  
+    await envoyerReponse(  
+      jid,  
+      '⚠️ Je n’ai pas réussi à récupérer ton message vocal.',  
+      msg  
+    );  
+    return;  
+  }  
+}  
+
+question = String(question || '').trim();  
+if (!question) return;  
+
+// --------------------------------------------------------  
+// OBSERVER LES MESSAGES DU GROUPE  
+// --------------------------------------------------------  
+
+if (isGroup && !hbot2EstMentionne(question)) {  
+  const important = await analyserInformation(question);  
+
+  if (important) {  
+    await memoriserGroupe(jid, question, getAuthorName(msg));  
+  }  
+
+  // Hbot2 n'intervient pas sans être appelé.  
+  return;  
+}  
+
+// --------------------------------------------------------  
+// QUESTION ADRESSÉE À HBOT2  
+// --------------------------------------------------------  
+
+question = nettoyerQuestion(question);  
+
+if (!question) question = 'Bonjour Hbot2';  
+
+if (question.startsWith('!')) {  
+  const handled = await traiterCommande(jid, question, msg, isVoice);  
+  if (handled) return;  
+}  
+
+// --------------------------------------------------------  
+// RÉCUPÉRER LA MÉMOIRE DU GROUPE  
+// --------------------------------------------------------  
+
+const groupMemory = isGroup  
+  ? await recupererMemoireGroupe(jid)  
+  : [];  
+
+// --------------------------------------------------------  
+// RECHERCHE INTERNET  
+// --------------------------------------------------------  
+
+let webData = null;  
+
+if (await questionNecessiteWeb(question)) {  
+  if (TAVILY_API_KEY) {  
+    console.log(`🌐 Recherche Internet : ${question}`);  
+    webData = await rechercherInternet(question);  
+  } else {  
+    console.warn('⚠️ Question actuelle, mais TAVILY_API_KEY manquante');  
+  }  
+}  
+
+// --------------------------------------------------------  
+// RÉPONSE IA  
+// --------------------------------------------------------  
+
+const answer = await genererIA(  
+  jid,  
+  question,  
+  groupMemory,  
+  webData  
+);  
+
+// Mémoriser une information nouvelle, si elle est importante.  
+if (isGroup) {  
+  const important = await analyserInformation(question);  
+
+  if (important) {  
+    await memoriserGroupe(jid, question, getAuthorName(msg));  
+  }  
+}  
+
+// --------------------------------------------------------  
+// RÉPONSE VOCALE OU TEXTE  
+// --------------------------------------------------------  
+
+await envoyerReponse(jid, answer, msg, isVoice);
+
+} catch (error) {
+console.error('❌ Erreur traitement message :', error);
+} finally {
+if (dedupeKey) processingMessages.delete(dedupeKey);
+}
+}
 
 // ============================================================
-// CONNEXION WHATSAPP ET RECONNEXION
+// CONNEXION WHATSAPP
 // ============================================================
 
 async function connecterWhatsApp() {
-  if (reconnecting) return;
+if (reconnecting) return;
 
-  reconnecting = true;
-  const generation = ++connectionGeneration;
+reconnecting = true;
+const generation = ++connectionGeneration;
 
-  try {
-    connectionStatus = 'Connexion à WhatsApp…';
-    lastConnectionUpdate = new Date().toISOString();
+try {
+const { state, saveCreds } = await useMultiFileAuthState(
+'auth_info_baileys_hbot2'
+);
 
-    const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
-    const { version } = await fetchLatestBaileysVersion();
+const { version } = await fetchLatestBaileysVersion();  
 
-    sock = makeWASocket({
-      version,
-      auth: state,
-      logger: pino({
-        level: process.env.LOG_LEVEL || 'silent'
-      }),
-      printQRInTerminal: false,
-      browser: ['Hbot2', 'Chrome', '1.0.0'],
-      markOnlineOnConnect: false,
-      syncFullHistory: false,
-      generateHighQualityLinkPreview: false,
-      connectTimeoutMs: 60000,
-      defaultQueryTimeoutMs: 60000
-    });
+console.log(`📱 Version Baileys : ${version.join('.')}`);  
 
-    sock.ev.on('creds.update', saveCreds);
+const sock = makeWASocket({  
+  version,  
+  auth: state,  
+  printQRInTerminal: false,  
+  logger: pino({ level: 'silent' }),  
+  browser: ['Hbot2', 'Chrome', '1.0.0'],  
+  markOnlineOnConnect: false  
+});  
 
-    // Le code d'appairage est généré par WhatsApp.
-    // Ce n'est pas un mot de passe personnalisé.
-    if (AUTH_MODE === 'pairing' && !state.creds.registered) {
-      if (!WHATSAPP_PHONE_NUMBER || WHATSAPP_PHONE_NUMBER.length < 8) {
-        throw new Error(
-          'Mode pairing sélectionné, mais WHATSAPP_PHONE_NUMBER est absent ' +
-          'ou invalide. Ajoute le numéro international sans + ni espaces ' +
-          'dans les variables Render.'
-        );
-      }
+sockInstance = sock;  
+sock.ev.on('creds.update', saveCreds);  
 
-      setTimeout(async () => {
-        if (
-          generation !== connectionGeneration ||
-          state.creds.registered
-        ) {
-          return;
-        }
+sock.ev.on('connection.update', async update => {  
+  if (generation !== connectionGeneration) return;  
 
-        try {
-          const code = await sock.requestPairingCode(
-            WHATSAPP_PHONE_NUMBER
-          );
+  const { connection, lastDisconnect, qr } = update;  
 
-          pairingCode =
-            String(code).match(/.{1,4}/g)?.join('-') || String(code);
+  if (qr) {  
+    try {  
+      currentQrImage = await QRCode.toDataURL(qr);  
+      console.log('📲 QR disponible sur la page Render.');  
+    } catch (error) {  
+      console.error('❌ Génération QR :', error.message);  
+    }  
+  }  
 
-          connectionStatus =
-            'Code d’appairage prêt — attente de validation';
+  if (connection === 'open') {  
+    isConnected = true;  
+    currentQrImage = null;  
+    reconnecting = false;  
 
-          lastConnectionUpdate = new Date().toISOString();
+    console.log('====================================');  
+    console.log('🟢 HBOT2 CONNECTÉ À WHATSAPP');  
+    console.log(`👤 Créateur : ${CREATOR_NAME}`);  
+    console.log(`🧠 Groq : ${groq ? 'OK' : 'MANQUANT'}`);  
+    console.log(`🌐 Tavily : ${TAVILY_API_KEY ? 'OK' : 'MANQUANT'}`);  
+    console.log(`🔊 ElevenLabs : ${ELEVENLABS_API_KEY && ELEVENLABS_VOICE_ID ? 'OK' : 'MANQUANT'}`);  
+    console.log(`🔥 Firestore : ${db ? 'OK' : 'MANQUANT'}`);  
+    console.log('====================================');  
+  }  
 
-          console.log('\n========================================');
-          console.log(`[${BOT_NAME}] CODE D’APPAIRAGE : ${pairingCode}`);
-          console.log('Ne partage pas ce code.');
-          console.log('========================================\n');
-        } catch (error) {
-          lastError = error?.message || String(error);
+  if (connection === 'close') {  
+    isConnected = false;  
+    currentQrImage = null;  
 
-          console.error(
-            '[Pairing] Impossible de générer le code :',
-            lastError
-          );
+    const statusCode = new Boom(lastDisconnect?.error)  
+      .output?.statusCode;  
 
-          connectionStatus =
-            'Erreur de génération du code d’appairage';
-        }
-      }, 1500);
-    }
+    const shouldReconnect = statusCode !== DisconnectReason.loggedOut;  
 
-    sock.ev.on('connection.update', async update => {
-      if (generation !== connectionGeneration) return;
+    console.log(`🔴 WhatsApp déconnecté. Code : ${statusCode}`);  
 
-      const { connection, lastDisconnect, qr } = update;
+    reconnecting = false;  
 
-      if (qr && AUTH_MODE !== 'pairing') {
-        try {
-          currentQrDataUrl = await QRCode.toDataURL(qr, {
-            width: 320,
-            margin: 2
-          });
-        } catch (error) {
-          console.error('[QR] Génération impossible:', error.message);
-        }
+    if (shouldReconnect) {  
+      console.log('🔄 Reconnexion dans 5 secondes...');  
+      setTimeout(() => {  
+        if (!reconnecting) connecterWhatsApp();  
+      }, 5000);  
+    } else {  
+      console.log('🚪 Session déconnectée. Une nouvelle association WhatsApp sera nécessaire.');  
+    }  
+  }  
+});  
 
-        connectionStatus = 'QR code prêt — scanne-le avec WhatsApp';
-        lastConnectionUpdate = new Date().toISOString();
+sock.ev.on('messages.upsert', async ({ messages, type }) => {  
+  if (type !== 'notify') return;  
 
-        console.log(
-          `[${BOT_NAME}] QR code disponible sur la page web du service.`
-        );
-      }
+  for (const msg of messages) {  
+    await traiterMessage(msg);  
+  }  
+});
 
-      if (connection === 'connecting') {
-        connectionStatus = 'Connexion à WhatsApp…';
-        lastConnectionUpdate = new Date().toISOString();
-      }
+} catch (error) {
+reconnecting = false;
+isConnected = false;
 
-      if (connection === 'open') {
-        currentQrDataUrl = null;
-        pairingCode = null;
+console.error('❌ Connexion WhatsApp :', error.message);  
 
-        connectionStatus = 'Connecté à WhatsApp';
-        lastConnectionUpdate = new Date().toISOString();
-        lastError = '';
+setTimeout(() => {  
+  if (!reconnecting) connecterWhatsApp();  
+}, 5000);
 
-        console.log(`[${BOT_NAME}] Connecté à WhatsApp.`);
-      }
-
-      if (connection === 'close') {
-        const statusCode =
-          new Boom(lastDisconnect?.error).output?.statusCode;
-
-        connectionStatus =
-          `Connexion fermée (${statusCode || 'inconnue'})`;
-
-        lastConnectionUpdate = new Date().toISOString();
-
-        const loggedOut =
-          statusCode === DisconnectReason.loggedOut;
-
-        console.error(
-          `[${BOT_NAME}] Connexion fermée. ` +
-          `Code=${statusCode || 'inconnu'}, loggedOut=${loggedOut}`
-        );
-
-        if (loggedOut) {
-          connectionStatus =
-            'Session déconnectée — il faut relier le compte';
-
-          console.error(
-            `[${BOT_NAME}] WhatsApp a déconnecté la session. ` +
-            `Il faudra supprimer le dossier ${AUTH_DIR} de session ` +
-            'et relier le compte avant de redémarrer.'
-          );
-
-          reconnecting = false;
-          return;
-        }
-
-        if (!reconnectTimer) {
-          reconnectTimer = setTimeout(() => {
-            reconnectTimer = null;
-            reconnecting = false;
-
-            connecterWhatsApp().catch(error => {
-              console.error('[Reconnect] Échec:', error.message);
-            });
-          }, 5000);
-        }
-      }
-    });
-
-    sock.ev.on('messages.upsert', async ({ messages, type }) => {
-      if (type !== 'notify') return;
-
-      for (const message of messages || []) {
-        traiterMessage(message).catch(error => {
-          console.error('[Message] Erreur non gérée:', error.message);
-        });
-      }
-    });
-  } catch (error) {
-    lastError = error?.message || String(error);
-    connectionStatus = 'Erreur de connexion';
-
-    console.error('[WhatsApp] Impossible de démarrer:', lastError);
-
-    if (!reconnectTimer) {
-      reconnectTimer = setTimeout(() => {
-        reconnectTimer = null;
-        reconnecting = false;
-
-        connecterWhatsApp().catch(err => {
-          console.error('[Reconnect] Échec:', err.message);
-        });
-      }, 7000);
-    }
-  } finally {
-    if (
-      !reconnectTimer &&
-      connectionStatus !== 'Erreur de connexion'
-    ) {
-      reconnecting = false;
-    }
-  }
+}
 }
 
 // ============================================================
-// GESTION DES ERREURS ET ARRÊT
+// ARRÊT PROPRE
 // ============================================================
 
 process.on('unhandledRejection', error => {
-  console.error('[Process] Promesse rejetée:', error);
+console.error('❌ Promesse non gérée :', error);
 });
 
 process.on('uncaughtException', error => {
-  console.error('[Process] Exception non interceptée:', error);
-  lastError = error?.message || String(error);
+console.error('❌ Exception :', error);
 });
 
-process.on('SIGTERM', () => {
-  console.log('[Process] SIGTERM reçu. Arrêt…');
+// ============================================================
+// DÉMARRAGE
+// ============================================================
 
-  try {
-    sock?.end(undefined);
-  } catch {}
+console.log('====================================');
+console.log('🤖 DÉMARRAGE DE HBOT2');
+console.log(👤 Créateur : ${CREATOR_NAME});
+console.log('🧠 Mémoire séparée par groupe');
+console.log('🌐 Recherche Web disponible si configurée');
+console.log('🎙️ Reconnaissance vocale disponible si configurée');
+console.log('🔊 Réponse vocale disponible si configurée');
+console.log('🚫 Aucun rappel automatique');
+console.log('====================================');
 
-  process.exit(0);
-});
-
-connecterWhatsApp().catch(error => {
-  console.error('[Démarrage] Erreur fatale:', error);
-  process.exitCode = 1;
-});
+connecterWhatsApp();
