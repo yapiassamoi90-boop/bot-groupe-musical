@@ -1,26 +1,26 @@
-
 {
-  "name": "hbot2",
-  "version": "1.0.0",
-  "private": true,
-  "description": "Bot WhatsApp Hbot2 avec IA, mémoire de groupe, recherche web et voix",
-  "type": "module",
-  "main": "index.js",
-  "scripts": {
-    "start": "node index.js",
-    "check": "node --check index.js"
-  },
-  "engines": {
-    "node": ">=20.0.0"
-  },
-  "dependencies": {
-    "@hapi/boom": "^10.0.1",
-    "@whiskeysockets/baileys": "^6.7.18",
-    "express": "^4.21.2",
-    "firebase-admin": "^13.0.2",
-    "groq-sdk": "^0.30.0",
-    "ffmpeg-static": "^5.2.0",
-    "pino": "^9.6.0",
-    "qrcode": "^1.5.4"
-  }
+"name": "hbot1",
+"version": "1.0.0",
+"private": true,
+"description": "Hbot1 - Assistant WhatsApp créé par Assamoi Yapi Hyppolite",
+"type": "module",
+"main": "index.js",
+"scripts": {
+"start": "node index.js",
+"check": "node --check index.js"
+},
+"engines": {
+"node": ">=20.0.0"
+},
+"dependencies": {
+"@hapi/boom": "^10.0.1",
+"@whiskeysockets/baileys": "^6.7.18",
+"express": "^4.21.2",
+"firebase-admin": "^13.0.2",
+"groq-sdk": "^0.30.0",
+"ffmpeg-static": "^5.2.0",
+"node-cron": "^3.0.3",
+"pino": "^9.6.0",
+"qrcode": "^1.5.4"
+}
 }
