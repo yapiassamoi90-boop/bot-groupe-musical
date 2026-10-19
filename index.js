@@ -364,3 +364,422 @@ async function genererIA(chatId, texte, options = {}) {
     return 'Je rencontre un petit problème pour réfléchir à ta question. Réessaie dans un instant.';
   }
 }
+// ======================================================
+// TÉLÉCHARGEMENT DES MÉDIAS WHATSAPP
+// ======================================================
+
+async function telechargerMedia(mediaMessage, type = 'image') {
+  const limites = {
+    image: MAX_IMAGE_BYTES,
+    video: MAX_VIDEO_BYTES,
+    audio: MAX_AUDIO_BYTES
+  };
+
+  const limite = limites[type] || MAX_IMAGE_BYTES;
+
+  const flux = await downloadContentFromMessage(
+    mediaMessage,
+    type
+  );
+
+  const morceaux = [];
+  let taille = 0;
+
+  for await (const morceau of flux) {
+    taille += morceau.length;
+
+    if (taille > limite) {
+      throw new Error(
+        `Le média dépasse la limite autorisée de ${Math.round(limite / 1024 / 1024)} Mo.`
+      );
+    }
+
+    morceaux.push(morceau);
+  }
+
+  return Buffer.concat(morceaux);
+}
+
+// ======================================================
+// TRANSCRIPTION AUDIO AVEC GROQ WHISPER
+// ======================================================
+
+async function transcrireAudio(
+  buffer,
+  filename = 'audio.ogg',
+  mimetype = 'audio/ogg'
+) {
+  if (!groq) {
+    throw new Error('Groq n’est pas configuré.');
+  }
+
+  const fichier = await toFile(
+    buffer,
+    filename,
+    { type: mimetype }
+  );
+
+  const resultat = await groq.audio.transcriptions.create({
+    file: fichier,
+    model: WHISPER_MODEL,
+    language: WHISPER_LANGUAGE,
+    response_format: 'text'
+  });
+
+  if (typeof resultat === 'string') {
+    return resultat.trim();
+  }
+
+  return String(resultat?.text || '').trim();
+}
+
+// ======================================================
+// GÉNÉRATION VOCALE ELEVENLABS
+// ======================================================
+
+async function genererAudioElevenLabs(texte) {
+  if (!ELEVENLABS_API_KEY || !ELEVENLABS_VOICE_ID) {
+    throw new Error(
+      'ELEVENLABS_API_KEY ou ELEVENLABS_VOICE_ID manquant.'
+    );
+  }
+
+  const reponse = await fetch(
+    `https://api.elevenlabs.io/v1/text-to-speech/${encodeURIComponent(ELEVENLABS_VOICE_ID)}?output_format=mp3_22050_32`,
+    {
+      method: 'POST',
+      headers: {
+        'xi-api-key': ELEVENLABS_API_KEY,
+        'Content-Type': 'application/json',
+        'Accept': 'audio/mpeg'
+      },
+      body: JSON.stringify({
+        text: nettoyerTexteVocal(texte),
+        model_id: ELEVENLABS_MODEL,
+        voice_settings: {
+          stability: 0.5,
+          similarity_boost: 0.75
+        }
+      })
+    }
+  );
+
+  if (!reponse.ok) {
+    const erreur = await reponse.text();
+
+    throw new Error(
+      `ElevenLabs ${reponse.status}: ${erreur.slice(0, 300)}`
+    );
+  }
+
+  return Buffer.from(await reponse.arrayBuffer());
+}
+
+// ======================================================
+// CONVERSION MP3 EN OGG OPUS AVEC FFMPEG
+// ======================================================
+
+async function convertirMp3EnOgg(mp3Buffer) {
+  if (!ffmpegPath) {
+    throw new Error('FFmpeg n’est pas disponible.');
+  }
+
+  const dossierTemp = await fs.mkdtemp(
+    path.join(os.tmpdir(), 'hbot1-')
+  );
+
+  const fichierMp3 = path.join(dossierTemp, 'audio.mp3');
+  const fichierOgg = path.join(dossierTemp, 'audio.ogg');
+
+  try {
+    await fs.writeFile(fichierMp3, mp3Buffer);
+
+    await new Promise((resolve, reject) => {
+      const processus = spawn(ffmpegPath, [
+        '-y',
+        '-i', fichierMp3,
+        '-vn',
+        '-ac', '1',
+        '-ar', '48000',
+        '-c:a', 'libopus',
+        '-b:a', '32k',
+        '-application', 'voip',
+        fichierOgg
+      ]);
+
+      let erreur = '';
+
+      processus.stderr.on('data', donnees => {
+        erreur += donnees.toString();
+      });
+
+      processus.on('error', reject);
+
+      processus.on('close', code => {
+        if (code === 0) {
+          resolve();
+        } else {
+          reject(
+            new Error(`Erreur FFmpeg (${code}): ${erreur.slice(-500)}`)
+          );
+        }
+      });
+    });
+
+    return await fs.readFile(fichierOgg);
+  } finally {
+    await fs.rm(dossierTemp, {
+      recursive: true,
+      force: true
+    });
+  }
+}
+
+// ======================================================
+// ENVOI D'UNE RÉPONSE VOCALE
+// ======================================================
+
+async function envoyerVocal(sock, jid, texte) {
+  if (!VOICE_REPLY_ENABLED) return false;
+
+  if (!ELEVENLABS_API_KEY || !ELEVENLABS_VOICE_ID) {
+    return false;
+  }
+
+  try {
+    const texteNettoye = nettoyerTexteVocal(texte);
+
+    if (!texteNettoye) return false;
+
+    const mp3 = await genererAudioElevenLabs(texteNettoye);
+    const ogg = await convertirMp3EnOgg(mp3);
+
+    await sock.sendMessage(jid, {
+      audio: ogg,
+      mimetype: 'audio/ogg; codecs=opus',
+      ptt: true
+    });
+
+    return true;
+  } catch (error) {
+    logger.error(
+      { error: error.message },
+      'Échec de l’envoi vocal.'
+    );
+
+    return false;
+  }
+}
+
+// ======================================================
+// EXTRACTION DES IMAGES D'UNE VIDÉO
+// ======================================================
+
+async function extraireImagesVideo(buffer) {
+  if (!ffmpegPath) {
+    throw new Error('FFmpeg n’est pas disponible.');
+  }
+
+  const dossierTemp = await fs.mkdtemp(
+    path.join(os.tmpdir(), 'hbot1-video-')
+  );
+
+  const fichierVideo = path.join(dossierTemp, 'video.mp4');
+
+  try {
+    await fs.writeFile(fichierVideo, buffer);
+
+    const duree = await new Promise((resolve, reject) => {
+      const processus = spawn(ffmpegPath, [
+        '-i', fichierVideo,
+        '-hide_banner'
+      ]);
+
+      let sortie = '';
+
+      processus.stderr.on('data', data => {
+        sortie += data.toString();
+      });
+
+      processus.on('error', reject);
+
+      processus.on('close', () => {
+        const match = sortie.match(
+          /Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)/
+        );
+
+        if (!match) {
+          reject(new Error('Durée de la vidéo inconnue.'));
+          return;
+        }
+
+        resolve(
+          Number(match[1]) * 3600 +
+          Number(match[2]) * 60 +
+          Number(match[3])
+        );
+      });
+    });
+
+    const positions = duree < 3
+      ? [Math.max(0, duree / 2)]
+      : [
+          duree * 0.15,
+          duree * 0.50,
+          duree * 0.85
+        ];
+
+    const images = [];
+
+    for (let i = 0; i < positions.length; i++) {
+      const fichierImage = path.join(
+        dossierTemp,
+        `image-${i}.jpg`
+      );
+
+      await new Promise((resolve, reject) => {
+        const processus = spawn(ffmpegPath, [
+          '-y',
+          '-ss', String(positions[i]),
+          '-i', fichierVideo,
+          '-frames:v', '1',
+          '-vf', 'scale=768:-1',
+          '-q:v', '5',
+          fichierImage
+        ]);
+
+        let erreur = '';
+
+        processus.stderr.on('data', data => {
+          erreur += data.toString();
+        });
+
+        processus.on('error', reject);
+
+        processus.on('close', code => {
+          if (code === 0) resolve();
+          else reject(
+            new Error(`Extraction image impossible: ${erreur.slice(-300)}`)
+          );
+        });
+      });
+
+      images.push(await fs.readFile(fichierImage));
+    }
+
+    return images;
+  } finally {
+    await fs.rm(dossierTemp, {
+      recursive: true,
+      force: true
+    });
+  }
+}
+
+// ======================================================
+// ANALYSE D'UNE IMAGE
+// ======================================================
+
+async function analyserImage(buffer, question = '') {
+  if (!groq) {
+    return 'L’analyse des images n’est pas disponible actuellement.';
+  }
+
+  const imageBase64 = buffer.toString('base64');
+
+  const message = [
+    {
+      type: 'text',
+      text: question ||
+        'Décris cette image avec précision, en français simple.'
+    },
+    {
+      type: 'image_url',
+      image_url: {
+        url: `data:image/jpeg;base64,${imageBase64}`
+      }
+    }
+  ];
+
+  try {
+    const resultat = await groq.chat.completions.create({
+      model: GROQ_VISION_MODEL,
+      messages: [
+        {
+          role: 'system',
+          content: SYSTEM_PROMPT
+        },
+        {
+          role: 'user',
+          content: message
+        }
+      ],
+      max_completion_tokens: 1000
+    });
+
+    return resultat.choices?.[0]?.message?.content ||
+      'Je n’ai pas réussi à analyser cette image.';
+  } catch (error) {
+    logger.error(
+      { error: error.message },
+      'Erreur analyse image.'
+    );
+
+    return 'Je n’arrive pas à analyser cette image pour le moment. Vérifie que le modèle de vision configuré est disponible sur Groq.';
+  }
+}
+
+// ======================================================
+// ANALYSE D'UNE VIDÉO
+// ======================================================
+
+async function analyserVideo(buffer, question = '') {
+  try {
+    const images = await extraireImagesVideo(buffer);
+
+    if (!images.length) {
+      return 'Je n’ai pas pu extraire les images de cette vidéo.';
+    }
+
+    const imagesBase64 = images.map(image => ({
+      type: 'image_url',
+      image_url: {
+        url: `data:image/jpeg;base64,${image.toString('base64')}`
+      }
+    }));
+
+    const contenu = [
+      {
+        type: 'text',
+        text: question ||
+          'Décris cette vidéo à partir des images fournies. Précise que ton analyse porte sur quelques images extraites.'
+      },
+      ...imagesBase64
+    ];
+
+    const resultat = await groq.chat.completions.create({
+      model: GROQ_VISION_MODEL,
+      messages: [
+        {
+          role: 'system',
+          content: SYSTEM_PROMPT
+        },
+        {
+          role: 'user',
+          content: contenu
+        }
+      ],
+      max_completion_tokens: 1200
+    });
+
+    return resultat.choices?.[0]?.message?.content ||
+      'Je n’ai pas réussi à analyser cette vidéo.';
+  } catch (error) {
+    logger.error(
+      { error: error.message },
+      'Erreur analyse vidéo.'
+    );
+
+    return 'Je n’ai pas réussi à analyser cette vidéo. Vérifie le format et la disponibilité du modèle de vision.';
+  }
+}
