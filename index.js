@@ -720,3 +720,454 @@ async function analyserVideo(buffer, question = '') {
   return result.choices[0]?.message?.content ||
     'Je n’ai pas réussi à analyser cette vidéo.';
 }
+// ==========================================
+// 🤖 INTELLIGENCE ARTIFICIELLE
+// ==========================================
+
+async function genererIA(promptUtilisateur, chatId = 'general') {
+  if (!groq) {
+    return "⚠️ Mon intelligence artificielle n'est pas configurée. Contacte l'administrateur.";
+  }
+
+  const history = getHistory(chatId);
+
+  try {
+    const messages = [
+      {
+        role: 'system',
+        content: systemInstruction
+      },
+      ...history,
+      {
+        role: 'user',
+        content: promptUtilisateur
+      }
+    ];
+
+    const chat = await groq.chat.completions.create({
+      model: GROQ_MODEL,
+      messages,
+      temperature: 0.7,
+      max_completion_tokens: 1200
+    });
+
+    const reponse =
+      chat.choices[0]?.message?.content ||
+      "Je n'ai pas bien saisi. Peux-tu reformuler ? 🙏";
+
+    history.push(
+      {
+        role: 'user',
+        content: promptUtilisateur
+      },
+      {
+        role: 'assistant',
+        content: reponse
+      }
+    );
+
+    if (history.length > MAX_HISTORY) {
+      history.splice(0, history.length - MAX_HISTORY);
+    }
+
+    return reponse;
+
+  } catch (err) {
+    console.error('❌ Erreur Groq :', err.message);
+
+    return "😅 Oups ! J'ai un petit problème avec mon intelligence artificielle. Réessaie dans quelques instants. 🙏";
+  }
+}
+
+// ==========================================
+// 🌐 SERVEUR WEB ET QR CODE
+// ==========================================
+
+app.get('/', (req, res) => {
+  if (isConnected) {
+    return res.send(`
+      <!DOCTYPE html>
+      <html lang="fr">
+      <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <title>Hbot1</title>
+      </head>
+
+      <body style="
+        background:#101827;
+        color:white;
+        font-family:Arial;
+        text-align:center;
+        padding:50px 15px;
+      ">
+        <h1 style="color:#39ff88;">✅ Hbot1 connecté</h1>
+        <p>Ton assistant WhatsApp est opérationnel.</p>
+
+        <p>🧠 Intelligence artificielle :
+          ${Boolean(groq) ? 'Oui' : 'Non'}
+        </p>
+
+        <p>🎤 Transcription vocale :
+          ${Boolean(groq) ? 'Disponible' : 'Non configurée'}
+        </p>
+
+        <p>🔊 Voix ElevenLabs :
+          ${Boolean(ELEVENLABS_API_KEY && ELEVENLABS_VOICE_ID)
+            ? 'Configurée'
+            : 'À configurer'}
+        </p>
+
+        <p>📸 Analyse des images :
+          ${Boolean(groq) ? 'Configurée' : 'Non configurée'}
+        </p>
+
+        <p>🎬 Analyse des vidéos :
+          ${Boolean(groq && ffmpegPath) ? 'Configurée' : 'Non configurée'}
+        </p>
+
+        <p>🔥 Firebase :
+          ${Boolean(db) ? 'Connecté' : 'Indisponible'}
+        </p>
+      </body>
+      </html>
+    `);
+  }
+
+  if (currentQrImage) {
+    return res.send(`
+      <!DOCTYPE html>
+      <html lang="fr">
+      <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <title>Connexion Hbot1</title>
+      </head>
+
+      <body style="
+        background:#101827;
+        color:white;
+        font-family:Arial;
+        text-align:center;
+        padding:30px 10px;
+      ">
+        <h2>📱 Connecter Hbot1</h2>
+        <p>Scanne ce QR Code avec WhatsApp.</p>
+
+        <img
+          src="${currentQrImage}"
+          style="
+            width:280px;
+            max-width:90%;
+            background:white;
+            padding:10px;
+            border-radius:12px;
+          "
+        />
+
+        <p>Rafraîchis la page si le QR Code expire.</p>
+      </body>
+      </html>
+    `);
+  }
+
+  res.send(`
+    <h2 style="text-align:center;font-family:Arial;">
+      ⏳ Génération du QR Code...
+    </h2>
+
+    <p style="text-align:center;">
+      Rafraîchis la page dans quelques secondes.
+    </p>
+  `);
+});
+
+app.get('/health', (req, res) => {
+  res.json({
+    bot: BOT_NAME,
+    connected: isConnected,
+    ai: Boolean(groq),
+    whisper: Boolean(groq),
+    elevenlabs: Boolean(
+      ELEVENLABS_API_KEY && ELEVENLABS_VOICE_ID
+    ),
+    ffmpeg: Boolean(ffmpegPath),
+    vision: Boolean(groq),
+    firebase: Boolean(db)
+  });
+});
+
+app.listen(PORT, '0.0.0.0', () => {
+  console.log(`🌍 Serveur actif sur le port ${PORT}`);
+});
+
+// ==========================================
+// ⛪ PROGRAMME DE L'ÉGLISE
+// ==========================================
+
+let texteProgrammeMois = `⛪ *ÉGLISE DES ASSEMBLÉES DE DIEU - TEMPLE DE LA RESTAURATION DIVINE*
+
+📅 *PROGRAMME DE SEPTEMBRE 2026*
+• *06/09/26* : Adoration: Anne | Célébration: Mme M'Bro | 1ère & 2e Offrande: Mme Diby
+• *13/09/26* : Adoration: Nancy | Célébration: Bérénice | 1ère & 2e Offrande: Evodie
+• *20/09/26* : Adoration: Mme M'Bro | Célébration: Anne | 1ère & 2e Offrande: Joanne
+• *27/09/26* : Adoration: Mme Assamoi | Célébration: Nancy | 1ère & 2e Offrande: Anne
+
+📅 *PROGRAMME D'OCTOBRE 2026*
+• *04/10/26* : Adoration: Evodie | Célébration: Mme M'Bro | 2e Offrande: Nancy
+• *11/10/26* : Adoration: Bérénice | Célébration: Mme Diallo | 2e Offrande: Marie-Ange
+• *18/10/26* : Adoration: Joanne | Célébration: Nancy | 2e Offrande: Evodie
+• *25/10/26* : Adoration: Ange/Marina | Célébration: Bérénice | 2e Offrande: Mme M'Bro`;
+
+function formatDate(date) {
+  const jour = String(date.getDate()).padStart(2, '0');
+  const mois = String(date.getMonth() + 1).padStart(2, '0');
+  const annee = String(date.getFullYear()).slice(-2);
+
+  return `${jour}/${mois}/${annee}`;
+}
+
+function getProgrammeDuDimanche() {
+  const maintenant = new Date();
+  const dimanche = new Date(maintenant);
+
+  const joursAvantDimanche =
+    (7 - dimanche.getDay()) % 7;
+
+  dimanche.setDate(
+    dimanche.getDate() + joursAvantDimanche
+  );
+
+  const dateStr = formatDate(dimanche);
+
+  const ligne = texteProgrammeMois
+    .split('\n')
+    .find(l => l.includes(dateStr));
+
+  if (ligne) {
+    return (
+      `🗓️ *PROGRAMME DU DIMANCHE (${dateStr})* ⛪\n\n` +
+      `${ligne}\n\nQue Dieu vous bénisse ! 🙏`
+    );
+  }
+
+  return `⛪ *PROGRAMME ACTUEL*\n\n${texteProgrammeMois}`;
+}
+
+// ==========================================
+// 💰 COTISATIONS FIREBASE
+// ==========================================
+
+async function getCotisationsReport() {
+  if (!db) {
+    return '❌ Firebase non disponible pour le moment.';
+  }
+
+  try {
+    const snap = await db
+      .collection('transactions')
+      .limit(100)
+      .get();
+
+    if (snap.empty) {
+      return `🟢 Aucun paiement récent enregistré.
+
+💡 Rappel : Cotisation de 100 FCFA chaque dimanche pour le studio et l'agapé.`;
+    }
+
+    const transactions = [];
+
+    snap.forEach(doc => {
+      const x = doc.data();
+
+      const name =
+        x.name || x.memberName || 'Membre';
+
+      const amount =
+        x.amount ?? x.montant ?? 500;
+
+      let dt = new Date();
+
+      if (x.timestamp?.toDate) {
+        dt = x.timestamp.toDate();
+
+      } else if (x.timestamp) {
+        const parsed = new Date(x.timestamp);
+
+        if (!Number.isNaN(parsed.getTime())) {
+          dt = parsed;
+        }
+      }
+
+      transactions.push({
+        name: String(name),
+        amount,
+        dt
+      });
+    });
+
+    const joanna = transactions.filter(
+      t => t.name.toLowerCase().includes('joanna')
+    );
+
+    const autres = transactions.filter(
+      t => !t.name.toLowerCase().includes('joanna')
+    );
+
+    autres.sort((a, b) => a.dt - b.dt);
+    joanna.sort((a, b) => a.dt - b.dt);
+
+    const liste = [...joanna, ...autres];
+
+    let out =
+      '📊 *CLASSEMENT DES COTISATIONS* 🪙\n\n';
+
+    liste.forEach((t, index) => {
+      const badge = index === 0 ? '🥇' : '✅';
+
+      out +=
+        `${badge} *${t.name}* : +${t.amount} FCFA ` +
+        `_( ${t.dt.toLocaleString('fr-FR', {
+          timeZone: 'Africa/Abidjan'
+        })} )_\n`;
+    });
+
+    return out +
+      '\n💡 Merci pour votre fidélité ! 🙏✨';
+
+  } catch (err) {
+    console.error('❌ Firebase :', err.message);
+
+    return '❌ Impossible de récupérer les cotisations actuellement.';
+  }
+}
+
+// ==========================================
+// 💰 RAPPELS COTISATIONS
+// ==========================================
+
+const cotisationsMessage = `💰 *RAPPEL COTISATION* 🎵
+
+🪙 100 FCFA chaque dimanche pour le studio & l'agapé !
+
+👔 Prenons soin de nos uniformes et de notre groupe.
+
+🤝 Demeurons unis !
+
+Tape !cotisation pour voir les paiements.
+
+*Psaumes 133:1* 🙏`;
+
+// ==========================================
+// ⏰ AUTOMATISATIONS
+// ==========================================
+
+async function envoyerAuGroupe(texte) {
+  if (!isConnected || !sockInstance) {
+    return;
+  }
+
+  try {
+    await sockInstance.sendMessage(
+      ID_GROUPE_WHATSAPP,
+      { text: texte }
+    );
+
+  } catch (err) {
+    console.error(
+      '❌ Envoi automatique :',
+      err.message
+    );
+  }
+}
+
+cron.schedule('30 6 * * *', async () => {
+  try {
+    const prompt = `
+Génère une courte méditation biblique du matin.
+Donne un verset biblique exact si tu le connais,
+une explication très simple et un encouragement.
+Maximum 5 lignes.
+`;
+
+    const texte = await genererIA(
+      prompt,
+      'meditation-matin'
+    );
+
+    await envoyerAuGroupe(
+      `🌅 *MÉDITATION DU MATIN* ☀️\n\n${texte}\n\nExcellente journée à tous ! 🙏✨`
+    );
+
+  } catch (err) {
+    console.error('❌ Méditation :', err.message);
+  }
+}, {
+  timezone: 'Africa/Abidjan'
+});
+
+function isFirstOrLastFriday(date) {
+  const dernierJour = new Date(
+    date.getFullYear(),
+    date.getMonth() + 1,
+    0
+  ).getDate();
+
+  return date.getDate() <= 7 ||
+    date.getDate() > dernierJour - 7;
+}
+
+cron.schedule('0 14 * * 5', async () => {
+  if (!isFirstOrLastFriday(new Date())) {
+    return;
+  }
+
+  await envoyerAuGroupe(
+    `🌙 *RAPPEL VEILLÉE RÉPÉTITION CE SOIR !* 🎵
+
+Venez nombreux préparer nos cœurs et nos chants
+pour la gloire de Dieu ! 🙏✨`
+  );
+}, {
+  timezone: 'Africa/Abidjan'
+});
+
+cron.schedule('0 14 * * 5,6', async () => {
+  await envoyerAuGroupe(
+    `🔔 *PROGRAMME WEEK-END* ⛪\n\n${getProgrammeDuDimanche()}`
+  );
+}, {
+  timezone: 'Africa/Abidjan'
+});
+
+cron.schedule('0 16 * * 6', async () => {
+  await envoyerAuGroupe(cotisationsMessage);
+}, {
+  timezone: 'Africa/Abidjan'
+});
+
+cron.schedule('30 11 * * 0', async () => {
+  await envoyerAuGroupe(cotisationsMessage);
+}, {
+  timezone: 'Africa/Abidjan'
+});
+
+async function envoyerRapportCotisationsDimanche() {
+  const report = await getCotisationsReport();
+
+  await envoyerAuGroupe(
+    `📢 *BILAN DES COTISATIONS DU DIMANCHE* 🪙\n\n${report}`
+  );
+}
+
+cron.schedule(
+  '0 17 * * 0',
+  envoyerRapportCotisationsDimanche,
+  { timezone: 'Africa/Abidjan' }
+);
+
+cron.schedule(
+  '0 20 * * 0',
+  envoyerRapportCotisationsDimanche,
+  { timezone: 'Africa/Abidjan' }
+);
