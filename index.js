@@ -783,3 +783,936 @@ async function analyserVideo(buffer, question = '') {
     return 'Je n’ai pas réussi à analyser cette vidéo. Vérifie le format et la disponibilité du modèle de vision.';
   }
 }
+// ======================================================
+// EXTRACTION DES MESSAGES WHATSAPP
+// ======================================================
+
+function obtenirMessageReel(message) {
+  let contenu = message?.message;
+
+  if (!contenu) return null;
+
+  for (let i = 0; i < 5; i++) {
+    if (contenu.ephemeralMessage?.message) {
+      contenu = contenu.ephemeralMessage.message;
+    } else if (contenu.viewOnceMessage?.message) {
+      contenu = contenu.viewOnceMessage.message;
+    } else if (contenu.viewOnceMessageV2?.message) {
+      contenu = contenu.viewOnceMessageV2.message;
+    } else if (contenu.viewOnceMessageV2Extension?.message) {
+      contenu = contenu.viewOnceMessageV2Extension.message;
+    } else {
+      break;
+    }
+  }
+
+  return contenu;
+}
+
+function extraireTexteMessage(message) {
+  const contenu = obtenirMessageReel(message);
+
+  if (!contenu) return '';
+
+  return (
+    contenu.conversation ||
+    contenu.extendedTextMessage?.text ||
+    contenu.imageMessage?.caption ||
+    contenu.videoMessage?.caption ||
+    contenu.documentMessage?.caption ||
+    contenu.buttonsResponseMessage?.selectedButtonId ||
+    contenu.listResponseMessage?.singleSelectReply?.selectedRowId ||
+    ''
+  ).trim();
+}
+
+function extraireContexte(message) {
+  const contenu = obtenirMessageReel(message);
+
+  return (
+    contenu?.extendedTextMessage?.contextInfo ||
+    contenu?.imageMessage?.contextInfo ||
+    contenu?.videoMessage?.contextInfo ||
+    contenu?.audioMessage?.contextInfo ||
+    contenu?.documentMessage?.contextInfo ||
+    {}
+  );
+}
+
+function extraireMedia(message) {
+  const contenu = obtenirMessageReel(message);
+
+  if (!contenu) return null;
+
+  if (contenu.imageMessage) {
+    return {
+      type: 'image',
+      message: contenu.imageMessage
+    };
+  }
+
+  if (contenu.videoMessage) {
+    return {
+      type: 'video',
+      message: contenu.videoMessage
+    };
+  }
+
+  if (contenu.audioMessage) {
+    return {
+      type: 'audio',
+      message: contenu.audioMessage
+    };
+  }
+
+  return null;
+}
+
+function reponseAuBot(message) {
+  const contexte = extraireContexte(message);
+  const botJid = obtenirJidBot();
+
+  if (!contexte?.participant || !botJid) return false;
+
+  return (
+    extraireNumeroJid(contexte.participant) ===
+    extraireNumeroJid(botJid)
+  );
+}
+
+function creerCleConversation(jid, expediteur) {
+  if (estJidGroupe(jid)) {
+    return `${jid}:${expediteur}`;
+  }
+
+  return jid;
+}
+
+// ======================================================
+// PROGRAMME DE L'ÉGLISE
+// ======================================================
+
+function texteProgrammeMois() {
+  return [
+    '📅 *PROGRAMME DE L’ÉGLISE*',
+    '',
+    'Église des Assemblées de Dieu',
+    'Temple de la Restauration Divine',
+    '',
+    'Pour obtenir les dates exactes des activités du mois, consulte les annonces officielles de l’église.',
+    '',
+    '⚠️ Je ne veux pas inventer de dates ou d’horaires qui n’ont pas été confirmés.'
+  ].join('\n');
+}
+
+function obtenirDateAbidjan(date = new Date()) {
+  const parties = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Africa/Abidjan',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit'
+  }).formatToParts(date);
+
+  const valeur = type =>
+    parties.find(partie => partie.type === type)?.value;
+
+  return {
+    annee: Number(valeur('year')),
+    mois: Number(valeur('month')),
+    jour: Number(valeur('day'))
+  };
+}
+
+function getProgrammeDuDimanche() {
+  const maintenant = new Date();
+  const dateAbidjan = obtenirDateAbidjan(maintenant);
+
+  const dateLocale = new Date(Date.UTC(
+    dateAbidjan.annee,
+    dateAbidjan.mois - 1,
+    dateAbidjan.jour
+  ));
+
+  const jourSemaine = dateLocale.getUTCDay();
+  const joursJusquaDimanche = (7 - jourSemaine) % 7;
+
+  dateLocale.setUTCDate(
+    dateLocale.getUTCDate() + joursJusquaDimanche
+  );
+
+  const dateFormatee = new Intl.DateTimeFormat('fr-FR', {
+    timeZone: 'UTC',
+    weekday: 'long',
+    day: 'numeric',
+    month: 'long',
+    year: 'numeric'
+  }).format(dateLocale);
+
+  return [
+    '📅 *PROGRAMME DU DIMANCHE*',
+    '',
+    `Date : ${dateFormatee}`,
+    '',
+    'Pour les heures de culte et les activités précises, consulte les annonces officielles de l’église.',
+    '',
+    'Que Dieu vous bénisse ! 🙏'
+  ].join('\n');
+}
+
+// ======================================================
+// RAPPORT DES COTISATIONS FIREBASE
+// ======================================================
+
+async function getCotisationsReport() {
+  if (!db) {
+    return '⚠️ Firebase n’est pas configuré. Impossible de consulter les cotisations.';
+  }
+
+  try {
+    const resultat = await db
+      .collection('transactions')
+      .limit(100)
+      .get();
+
+    if (resultat.empty) {
+      return 'Aucune transaction de cotisation trouvée.';
+    }
+
+    const transactions = resultat.docs.map(doc => {
+      const data = doc.data();
+
+      return {
+        nom: data.name || data.memberName || data.nom || 'Membre inconnu',
+        montant: Number(
+          data.amount ?? data.montant ?? 0
+        ),
+        date: data.date || data.createdAt || null
+      };
+    });
+
+    transactions.sort((a, b) => {
+      const aJoanna = normaliserTexte(a.nom).includes('joanna');
+      const bJoanna = normaliserTexte(b.nom).includes('joanna');
+
+      if (aJoanna && !bJoanna) return -1;
+      if (!aJoanna && bJoanna) return 1;
+
+      return a.nom.localeCompare(b.nom, 'fr');
+    });
+
+    const total = transactions.reduce(
+      (somme, transaction) => somme + transaction.montant,
+      0
+    );
+
+    const lignes = transactions.map(transaction =>
+      `• ${transaction.nom} : ${transaction.montant.toLocaleString('fr-FR')} FCFA`
+    );
+
+    return [
+      '📊 *RAPPORT DES COTISATIONS*',
+      '',
+      ...lignes,
+      '',
+      `*Total enregistré : ${total.toLocaleString('fr-FR')} FCFA*`,
+      '',
+      '⚠️ Ce rapport dépend des champs réellement enregistrés dans Firebase.'
+    ].join('\n');
+  } catch (error) {
+    logger.error(
+      { error: error.message },
+      'Erreur rapport cotisations.'
+    );
+
+    return 'Impossible de récupérer le rapport des cotisations pour le moment.';
+  }
+}
+
+// ======================================================
+// COMMANDES
+// ======================================================
+
+async function traiterCommande(texte, jid, sock, message, chatId) {
+  const commande = normaliserTexte(texte).split(/\s+/)[0];
+
+  switch (commande) {
+    case '!aide':
+    case '!help':
+      return [
+        '🤖 *COMMANDES DE HBOT1*',
+        '',
+        '!aide — Affiche les commandes',
+        '!id — Affiche l’identifiant du groupe ou du chat',
+        '!resetia — Réinitialise ton historique de conversation',
+        '!programme — Affiche les informations du programme',
+        '!cotisations — Affiche le rapport Firebase',
+        '',
+        'Tu peux aussi me poser directement tes questions.'
+      ].join('\n');
+
+    case '!id':
+      return `🆔 Identifiant de ce chat :\n${jid}`;
+
+    case '!resetia':
+      resetHistory(chatId);
+      return '✅ Ton historique de conversation a été réinitialisé.';
+
+    case '!programme':
+      return texteProgrammeMois() + '\n\n' + getProgrammeDuDimanche();
+
+    case '!cotisations':
+      return await getCotisationsReport();
+
+    case '!setprogramme':
+      return '⚠️ Cette commande ne modifie pas encore le programme. Les changements doivent être ajoutés explicitement au code ou à une source de données administrable.';
+
+    default:
+      return null;
+  }
+}
+
+// ======================================================
+// TRAITEMENT DES MESSAGES
+// ======================================================
+
+async function traiterMessages(sock, message) {
+  const jid = message.key?.remoteJid;
+
+  if (!jid || jid === 'status@broadcast') return;
+  if (message.key?.fromMe) return;
+
+  const expediteur =
+    message.key?.participant ||
+    jid;
+
+  const cleMessage =
+    message.key?.id
+      ? `${jid}:${message.key.id}`
+      : null;
+
+  if (cleMessage && processingMessages.has(cleMessage)) {
+    return;
+  }
+
+  if (cleMessage) {
+    processingMessages.add(cleMessage);
+  }
+
+  try {
+    const texteOriginal = extraireTexteMessage(message);
+    const texteNormalise = normaliserTexte(texteOriginal);
+    const groupe = estJidGroupe(jid);
+
+    const mentionBot = estMentionBot(message, texteOriginal);
+    const reponseBot = reponseAuBot(message);
+
+    const commande = estCommandeDirecte(texteOriginal);
+
+    // Dans un groupe, ne pas répondre à toutes les conversations.
+    if (groupe && !mentionBot && !reponseBot && !commande) {
+      return;
+    }
+
+    const chatId = creerCleConversation(jid, expediteur);
+
+    // Commandes commençant par !
+    if (commande) {
+      const reponseCommande = await traiterCommande(
+        texteOriginal,
+        jid,
+        sock,
+        message,
+        chatId
+      );
+
+      if (reponseCommande) {
+        await sock.sendMessage(jid, {
+          text: reponseCommande
+        }, {
+          quoted: message
+        });
+
+        return;
+      }
+    }
+
+    // Réponse à une demande d'identité sans commande.
+    if (
+      texteNormalise === 'qui es tu' ||
+      texteNormalise === 'qui est hbot1' ||
+      texteNormalise === 'qui es hbot1' ||
+      texteNormalise === 'qui t a cree' ||
+      texteNormalise === 'qui est ton createur'
+    ) {
+      await sock.sendMessage(jid, {
+        text: `Je suis ${BOT_NAME}, créé et développé par ${CREATOR_NAME}. 😊`
+      }, {
+        quoted: message
+      });
+
+      return;
+    }
+
+    const media = extraireMedia(message);
+
+    // --------------------------------------------------
+    // AUDIO / MESSAGE VOCAL
+    // --------------------------------------------------
+
+    if (media?.type === 'audio') {
+      try {
+        const buffer = await telechargerMedia(
+          media.message,
+          'audio'
+        );
+
+        const transcription = await transcrireAudio(
+          buffer,
+          media.message.mimetype?.includes('mpeg')
+            ? 'audio.mp3'
+            : 'audio.ogg',
+          media.message.mimetype || 'audio/ogg'
+        );
+
+        if (!transcription) {
+          await sock.sendMessage(jid, {
+            text: 'Je n’ai pas réussi à comprendre ce message vocal. Peux-tu le renvoyer ?'
+          }, {
+            quoted: message
+          });
+
+          return;
+        }
+
+        const reponse = await genererIA(
+          chatId,
+          transcription
+        );
+
+        const vocalEnvoye = await envoyerVocal(
+          sock,
+          jid,
+          reponse
+        );
+
+        if (!vocalEnvoye) {
+          await sock.sendMessage(jid, {
+            text: reponse
+          }, {
+            quoted: message
+          });
+        }
+
+        return;
+      } catch (error) {
+        logger.error(
+          { error: error.message },
+          'Erreur traitement audio.'
+        );
+
+        await sock.sendMessage(jid, {
+          text: 'Je n’arrive pas à traiter ce message vocal pour le moment. Réessaie avec un audio plus court.'
+        }, {
+          quoted: message
+        });
+
+        return;
+      }
+    }
+
+    // --------------------------------------------------
+    // IMAGE
+    // --------------------------------------------------
+
+    if (media?.type === 'image') {
+      try {
+        const buffer = await telechargerMedia(
+          media.message,
+          'image'
+        );
+
+        const question = texteOriginal ||
+          'Décris cette image.';
+
+        const reponse = await analyserImage(
+          buffer,
+          question
+        );
+
+        await sock.sendMessage(jid, {
+          text: reponse
+        }, {
+          quoted: message
+        });
+
+        return;
+      } catch (error) {
+        logger.error(
+          { error: error.message },
+          'Erreur traitement image.'
+        );
+
+        await sock.sendMessage(jid, {
+          text: 'Je n’arrive pas à lire cette image. Vérifie son format ou envoie une image plus légère.'
+        }, {
+          quoted: message
+        });
+
+        return;
+      }
+    }
+
+    // --------------------------------------------------
+    // VIDÉO
+    // --------------------------------------------------
+
+    if (media?.type === 'video') {
+      try {
+        const buffer = await telechargerMedia(
+          media.message,
+          'video'
+        );
+
+        const question = texteOriginal ||
+          'Décris cette vidéo.';
+
+        const reponse = await analyserVideo(
+          buffer,
+          question
+        );
+
+        await sock.sendMessage(jid, {
+          text: reponse
+        }, {
+          quoted: message
+        });
+
+        return;
+      } catch (error) {
+        logger.error(
+          { error: error.message },
+          'Erreur traitement vidéo.'
+        );
+
+        await sock.sendMessage(jid, {
+          text: 'Je n’arrive pas à analyser cette vidéo. Essaie avec une vidéo plus courte et plus légère.'
+        }, {
+          quoted: message
+        });
+
+        return;
+      }
+    }
+
+    // --------------------------------------------------
+    // TEXTE NORMAL
+    // --------------------------------------------------
+
+    let textePourIA = texteOriginal;
+
+    if (groupe) {
+      textePourIA = nettoyerMention(textePourIA)
+        .replace(new RegExp(
+          BOT_NAME.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'),
+          'ig'
+        ), '')
+        .trim();
+    }
+
+    if (!textePourIA) {
+      textePourIA = 'Bonjour !';
+    }
+
+    const reponse = await genererIA(
+      chatId,
+      textePourIA
+    );
+
+    await sock.sendMessage(jid, {
+      text: reponse
+    }, {
+      quoted: message
+    });
+  } catch (error) {
+    logger.error(
+      { error: error.message },
+      'Erreur générale traitement message.'
+    );
+  } finally {
+    if (cleMessage) {
+      processingMessages.delete(cleMessage);
+    }
+  }
+}
+
+// ======================================================
+// EXPRESS : PAGE D'ÉTAT ET HEALTH CHECK
+// ======================================================
+
+const app = express();
+
+app.get('/', async (req, res) => {
+  let qrHtml = '<p>QR code indisponible pour le moment.</p>';
+
+  if (currentQrImage && !isConnected) {
+    qrHtml = `<img src="${currentQrImage}" alt="QR WhatsApp" style="max-width:300px;width:100%">`;
+  }
+
+  res.status(200).send(`
+    <!doctype html>
+    <html lang="fr">
+    <head>
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width, initial-scale=1">
+      <meta http-equiv="refresh" content="15">
+      <title>${BOT_NAME}</title>
+      <style>
+        body {
+          font-family: Arial, sans-serif;
+          background: #111;
+          color: #fff;
+          text-align: center;
+          padding: 30px;
+        }
+        .card {
+          max-width: 500px;
+          margin: auto;
+          padding: 25px;
+          border-radius: 15px;
+          background: #222;
+        }
+        img { border-radius: 10px; }
+        .ok { color: #4ade80; }
+        .wait { color: #facc15; }
+      </style>
+    </head>
+    <body>
+      <div class="card">
+        <h1>${BOT_NAME}</h1>
+        <p>Créé par ${CREATOR_NAME}</p>
+        <h2 class="${isConnected ? 'ok' : 'wait'}">
+          ${isConnected ? 'WhatsApp connecté' : 'En attente de connexion'}
+        </h2>
+        ${qrHtml}
+        <p>Actualisation automatique toutes les 15 secondes.</p>
+      </div>
+    </body>
+    </html>
+  `);
+});
+
+app.get('/health', (req, res) => {
+  res.status(200).json({
+    bot: BOT_NAME,
+    status: 'ok',
+    whatsapp: isConnected,
+    groq: Boolean(groq),
+    whisper: Boolean(groq),
+    elevenlabs: Boolean(
+      ELEVENLABS_API_KEY && ELEVENLABS_VOICE_ID
+    ),
+    firebase: Boolean(db),
+    voiceReplyEnabled: VOICE_REPLY_ENABLED,
+    uptime: Math.floor(process.uptime()),
+    timestamp: new Date().toISOString()
+  });
+});
+
+const server = app.listen(PORT, '0.0.0.0', () => {
+  logger.info(`Serveur web actif sur le port ${PORT}.`);
+});
+
+// ======================================================
+// ENVOI DES MESSAGES AUTOMATIQUES
+// ======================================================
+
+async function envoyerMessageGroupe(texte) {
+  if (!sockInstance || !isConnected) {
+    logger.warn('Message automatique ignoré : WhatsApp non connecté.');
+    return;
+  }
+
+  if (!WHATSAPP_GROUP_ID) {
+    logger.warn('WHATSAPP_GROUP_ID non configuré.');
+    return;
+  }
+
+  try {
+    await sockInstance.sendMessage(WHATSAPP_GROUP_ID, {
+      text: texte
+    });
+
+    logger.info('Message automatique envoyé.');
+  } catch (error) {
+    logger.error(
+      { error: error.message },
+      'Erreur envoi message automatique.'
+    );
+  }
+}
+
+// ======================================================
+// PROGRAMMATION DES RAPPELS
+// ======================================================
+
+cron.schedule('30 6 * * *', async () => {
+  await envoyerMessageGroupe(
+    '🙏 *MÉDITATION DU MATIN*\n\nPrenons quelques instants pour prier, méditer la Parole de Dieu et commencer cette journée avec foi. Que Dieu vous bénisse !'
+  );
+}, {
+  timezone: 'Africa/Abidjan'
+});
+
+cron.schedule('0 14 * * 5', async () => {
+  const date = obtenirDateAbidjan();
+  const dateUtc = new Date(Date.UTC(
+    date.annee,
+    date.mois - 1,
+    date.jour
+  ));
+
+  const jour = dateUtc.getUTCDate();
+  const dernierJour = new Date(
+    Date.UTC(date.annee, date.mois, 0)
+  ).getUTCDate();
+
+  const premierVendredi = jour <= 7;
+  const dernierVendredi = jour > dernierJour - 7;
+
+  if (premierVendredi || dernierVendredi) {
+    await envoyerMessageGroupe(
+      '🙏 *RAPPEL DE VEILLÉE*\n\nN’oublions pas notre rendez-vous de prière. Pour les horaires et les détails, veuillez consulter les annonces officielles de l’église.'
+    );
+  }
+}, {
+  timezone: 'Africa/Abidjan'
+});
+
+cron.schedule('0 14 * * 5,6', async () => {
+  await envoyerMessageGroupe(
+    '⛪ *PROGRAMME DU WEEK-END*\n\nPréparons nos cœurs pour les activités spirituelles du week-end. Pour les horaires exacts, veuillez consulter les annonces officielles de l’église.'
+  );
+}, {
+  timezone: 'Africa/Abidjan'
+});
+
+cron.schedule('0 16 * * 6', async () => {
+  await envoyerMessageGroupe(
+    '💰 *RAPPEL DES COTISATIONS*\n\nN’oublions pas notre participation aux cotisations prévues pour le studio et l’agapé. Merci à chacun pour son engagement.'
+  );
+}, {
+  timezone: 'Africa/Abidjan'
+});
+
+cron.schedule('30 11 * * 0', async () => {
+  await envoyerMessageGroupe(
+    '🙏 *RAPPEL DU DIMANCHE*\n\nQue chacun se prépare pour le culte et les activités de l’église. Bon dimanche à tous !'
+  );
+}, {
+  timezone: 'Africa/Abidjan'
+});
+
+cron.schedule('0 17 * * 0', async () => {
+  const rapport = await getCotisationsReport();
+
+  await envoyerMessageGroupe(
+    `📊 *RAPPORT HEBDOMADAIRE*\n\n${rapport}`
+  );
+}, {
+  timezone: 'Africa/Abidjan'
+});
+
+cron.schedule('0 20 * * 0', async () => {
+  await envoyerMessageGroupe(
+    '🌙 Bonne soirée à tous ! Que Dieu vous accorde une nuit paisible. N’oublions pas de garder un moment pour la prière.'
+  );
+}, {
+  timezone: 'Africa/Abidjan'
+});
+
+// ======================================================
+// CONNEXION WHATSAPP
+// ======================================================
+
+async function connectToWhatsApp() {
+  if (connexionEnCours) {
+    logger.info('Connexion WhatsApp déjà en cours.');
+    return;
+  }
+
+  connexionEnCours = true;
+  const generation = ++connectionGeneration;
+
+  try {
+    const {
+      state,
+      saveCreds
+    } = await useMultiFileAuthState(AUTH_FOLDER);
+
+    let version;
+
+    try {
+      const resultat = await fetchLatestBaileysVersion();
+      version = resultat.version;
+    } catch (error) {
+      logger.warn(
+        { error: error.message },
+        'Impossible de récupérer la version Baileys. Utilisation de la version par défaut.'
+      );
+    }
+
+    const sock = makeWASocket({
+      ...(version ? { version } : {}),
+      auth: state,
+      logger,
+      printQRInTerminal: false,
+      browser: ['Hbot1', 'Chrome', '1.0.0'],
+      markOnlineOnConnect: false,
+      syncFullHistory: false
+    });
+
+    sockInstance = sock;
+
+    sock.ev.on('creds.update', saveCreds);
+
+    sock.ev.on('connection.update', async update => {
+      if (generation !== connectionGeneration) return;
+
+      const {
+        connection,
+        lastDisconnect,
+        qr
+      } = update;
+
+      if (qr) {
+        try {
+          currentQrImage = await QRCode.toDataURL(qr);
+          logger.info(
+            'QR code disponible sur la page web du bot.'
+          );
+        } catch (error) {
+          logger.error(
+            { error: error.message },
+            'Erreur génération QR.'
+          );
+        }
+      }
+
+      if (connection === 'open') {
+        isConnected = true;
+        currentQrImage = null;
+        logger.info('WhatsApp connecté avec succès.');
+      }
+
+      if (connection === 'close') {
+        isConnected = false;
+        currentQrImage = null;
+
+        const code =
+          lastDisconnect?.error?.output?.statusCode;
+
+        const deconnecte =
+          code === DisconnectReason.loggedOut;
+
+        logger.warn(
+          { code, deconnecte },
+          'Connexion WhatsApp fermée.'
+        );
+
+        if (deconnecte) {
+          logger.error(
+            'Session déconnectée. Supprime les anciennes données de session uniquement si tu souhaites scanner un nouveau QR code.'
+          );
+          return;
+        }
+
+        setTimeout(() => {
+          if (generation === connectionGeneration) {
+            connectToWhatsApp().catch(error => {
+              logger.error(
+                { error: error.message },
+                'Échec reconnexion WhatsApp.'
+              );
+            });
+          }
+        }, 5000);
+      }
+    });
+
+    sock.ev.on('messages.upsert', async evenement => {
+      if (generation !== connectionGeneration) return;
+
+      if (evenement.type !== 'notify') return;
+
+      for (const message of evenement.messages || []) {
+        await traiterMessages(sock, message);
+      }
+    });
+  } catch (error) {
+    logger.error(
+      { error: error.message },
+      'Erreur connexion WhatsApp.'
+    );
+
+    setTimeout(() => {
+      if (generation === connectionGeneration) {
+        connectToWhatsApp().catch(err => {
+          logger.error(
+            { error: err.message },
+            'Nouvelle tentative impossible.'
+          );
+        });
+      }
+    }, 5000);
+  } finally {
+    connexionEnCours = false;
+  }
+}
+
+// ======================================================
+// ARRÊT PROPRE
+// ======================================================
+
+async function arreter(signal) {
+  logger.info(`Signal ${signal} reçu. Arrêt du bot.`);
+
+  try {
+    server.close();
+  } catch {}
+
+  try {
+    sockInstance?.end(
+      new Error('Arrêt du processus.')
+    );
+  } catch {}
+
+  process.exit(0);
+}
+
+process.on('SIGINT', () => arreter('SIGINT'));
+process.on('SIGTERM', () => arreter('SIGTERM'));
+
+process.on('unhandledRejection', erreur => {
+  logger.error(
+    { error: String(erreur) },
+    'Promesse rejetée non gérée.'
+  );
+});
+
+process.on('uncaughtException', erreur => {
+  logger.error(
+    { error: erreur.message, stack: erreur.stack },
+    'Exception non interceptée.'
+  );
+});
+
+// ======================================================
+// DÉMARRAGE
+// ======================================================
+
+connectToWhatsApp().catch(error => {
+  logger.error(
+    { error: error.message },
+    'Démarrage WhatsApp impossible.'
+  );
+});
