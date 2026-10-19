@@ -1171,3 +1171,720 @@ cron.schedule(
   envoyerRapportCotisationsDimanche,
   { timezone: 'Africa/Abidjan' }
 );
+// ============================================================
+// PARTIE 3/3 — WHATSAPP, COMMANDES, MÉDIAS ET CONNEXION
+// ============================================================
+
+function deballerMessage(message) {
+  let contenu = message;
+
+  // Déballer les messages éphémères et les messages à vue unique.
+  for (let i = 0; i < 5 && contenu; i++) {
+    if (contenu.ephemeralMessage?.message) {
+      contenu = contenu.ephemeralMessage.message;
+      continue;
+    }
+
+    if (contenu.viewOnceMessage?.message) {
+      contenu = contenu.viewOnceMessage.message;
+      continue;
+    }
+
+    if (contenu.viewOnceMessageV2?.message) {
+      contenu = contenu.viewOnceMessageV2.message;
+      continue;
+    }
+
+    if (contenu.viewOnceMessageV2Extension?.message) {
+      contenu = contenu.viewOnceMessageV2Extension.message;
+      continue;
+    }
+
+    break;
+  }
+
+  return contenu || {};
+}
+
+function memeIdentifiant(a, b) {
+  const nettoyer = (valeur) =>
+    String(valeur || '').split('@')[0].split(':')[0];
+
+  const premier = nettoyer(a);
+  const second = nettoyer(b);
+
+  return Boolean(premier && second && premier === second);
+}
+
+function extraireTexteMessage(message) {
+  const contenu = deballerMessage(message);
+
+  return (
+    contenu.conversation ||
+    contenu.extendedTextMessage?.text ||
+    contenu.imageMessage?.caption ||
+    contenu.videoMessage?.caption ||
+    contenu.documentMessage?.caption ||
+    contenu.documentWithCaptionMessage?.message?.documentMessage?.caption ||
+    ''
+  ).trim();
+}
+
+function extraireContexte(message) {
+  const contenu = deballerMessage(message);
+
+  return (
+    contenu.extendedTextMessage?.contextInfo ||
+    contenu.imageMessage?.contextInfo ||
+    contenu.videoMessage?.contextInfo ||
+    contenu.audioMessage?.contextInfo ||
+    contenu.documentMessage?.contextInfo ||
+    contenu.stickerMessage?.contextInfo ||
+    {}
+  );
+}
+
+function extraireMedia(message) {
+  const contenu = deballerMessage(message);
+
+  if (contenu.imageMessage) {
+    return {
+      type: 'image',
+      message: contenu.imageMessage,
+      mime: contenu.imageMessage.mimetype || 'image/jpeg'
+    };
+  }
+
+  if (contenu.videoMessage) {
+    return {
+      type: 'video',
+      message: contenu.videoMessage,
+      mime: contenu.videoMessage.mimetype || 'video/mp4'
+    };
+  }
+
+  if (contenu.audioMessage) {
+    return {
+      type: 'audio',
+      message: contenu.audioMessage,
+      mime: contenu.audioMessage.mimetype || 'audio/ogg'
+    };
+  }
+
+  if (contenu.documentMessage) {
+    const document = contenu.documentMessage;
+    const mime = document.mimetype || 'application/octet-stream';
+
+    if (mime.startsWith('image/')) {
+      return { type: 'image', message: document, mime };
+    }
+
+    if (mime.startsWith('video/')) {
+      return { type: 'video', message: document, mime };
+    }
+
+    if (mime.startsWith('audio/')) {
+      return { type: 'audio', message: document, mime };
+    }
+  }
+
+  return null;
+}
+
+function retirerMentionBot(texte) {
+  return String(texte || '')
+    .replace(/^\s*@?hbot1\b[\s,:;.!?-]*/i, '')
+    .replace(/^\s*@?hbot\b[\s,:;.!?-]*/i, '')
+    .trim();
+}
+
+function creerAide() {
+  return `🤖 *${BOT_NAME} — Assistant WhatsApp*
+
+Je suis ${BOT_NAME}, créé et développé par Assamoi Yapi Hyppolite.
+
+Je peux notamment :
+• Répondre aux questions et expliquer des sujets.
+• Aider à comprendre la Bible.
+• Analyser une image si tu me poses une question à son sujet.
+• Examiner les images extraites d'une vidéo.
+• Écouter les messages vocaux et répondre.
+• Donner les informations du programme de l'église.
+• Consulter les informations de cotisations enregistrées.
+
+*Commandes disponibles :*
+!help — afficher cette aide
+!id — afficher l'identifiant de la conversation
+!resetia — réinitialiser mon historique de discussion
+!programme — afficher le programme
+!cotisation — afficher le rapport des cotisations
+
+Dans un groupe, mentionne *${BOT_NAME}* ou réponds à l'un de mes messages pour m'interpeller.`;
+}
+
+// ------------------------------------------------------------
+// GESTION DES COMMANDES
+// ------------------------------------------------------------
+
+async function traiterCommande(texte, jid, sock, message) {
+  const commande = texte.trim();
+  const normalisee = commande.toLowerCase();
+  const chatId = jid;
+
+  if (
+    normalisee === '!help' ||
+    normalisee === '!aide' ||
+    normalisee === 'aide'
+  ) {
+    await sock.sendMessage(jid, { text: creerAide() });
+    return true;
+  }
+
+  if (normalisee === '!id') {
+    await sock.sendMessage(jid, {
+      text: `🆔 Identifiant de cette conversation :\n${jid}`
+    });
+    return true;
+  }
+
+  if (
+    normalisee === '!resetia' ||
+    normalisee === '!reset'
+  ) {
+    resetHistory(chatId);
+
+    await sock.sendMessage(jid, {
+      text: '✅ Mon historique de conversation pour cet échange a été réinitialisé.'
+    });
+
+    return true;
+  }
+
+  if (
+    normalisee === '!cotisation' ||
+    normalisee === '!cotisations' ||
+    normalisee === '!c'
+  ) {
+    const rapport = await getCotisationsReport();
+
+    await sock.sendMessage(jid, {
+      text: rapport || 'Aucune cotisation enregistrée pour le moment.'
+    });
+
+    return true;
+  }
+
+  if (
+    normalisee === '!programme' ||
+    normalisee === '!p' ||
+    normalisee === '!programme complet' ||
+    normalisee === '!programme mois'
+  ) {
+    const programme =
+      typeof getProgrammeDuDimanche === 'function'
+        ? getProgrammeDuDimanche()
+        : texteProgrammeMois;
+
+    await sock.sendMessage(jid, {
+      text: programme || texteProgrammeMois
+    });
+
+    return true;
+  }
+
+  if (
+    normalisee === 'qui est hbot1' ||
+    normalisee === 'qui es-tu' ||
+    normalisee === 'qui est hbot' ||
+    normalisee === 'hbot1' ||
+    normalisee === 'hbot'
+  ) {
+    await sock.sendMessage(jid, {
+      text: creerAide()
+    });
+
+    return true;
+  }
+
+  // Commande administrative facultative : modifier le programme
+  // uniquement pour la session en cours.
+  if (normalisee.startsWith('!setprogramme ')) {
+    const groupe = jid.endsWith('@g.us');
+
+    if (!groupe) {
+      await sock.sendMessage(jid, {
+        text: 'Cette commande est réservée aux administrateurs du groupe.'
+      });
+      return true;
+    }
+
+    const participant = message.key?.participant;
+    const metadata = await sock.groupMetadata(jid).catch(() => null);
+
+    const membre = metadata?.participants?.find((p) =>
+      memeIdentifiant(p.id, participant)
+    );
+
+    const estAdmin =
+      membre?.admin === 'admin' ||
+      membre?.admin === 'superadmin';
+
+    if (!estAdmin) {
+      await sock.sendMessage(jid, {
+        text: '⛔ Seuls les administrateurs du groupe peuvent utiliser cette commande.'
+      });
+      return true;
+    }
+
+    await sock.sendMessage(jid, {
+      text:
+        '⚠️ La commande !setprogramme n’est pas activée dans cette version. ' +
+        'Le programme doit être modifié directement dans le code.'
+    });
+
+    return true;
+  }
+
+  return false;
+}
+
+// ------------------------------------------------------------
+// TÉLÉCHARGEMENT ET TRANSCRIPTION DES VOCAUX
+// ------------------------------------------------------------
+
+async function telechargerAudio(audioMessage, type = 'audio') {
+  const morceaux = [];
+
+  const flux = await downloadContentFromMessage(
+    audioMessage,
+    type
+  );
+
+  for await (const morceau of flux) {
+    morceaux.push(morceau);
+  }
+
+  return Buffer.concat(morceaux);
+}
+
+// ------------------------------------------------------------
+// TRAITEMENT DES MESSAGES WHATSAPP
+// ------------------------------------------------------------
+
+async function traiterMessages(sock, messages) {
+  for (const message of messages) {
+    try {
+      if (!message?.message || message.key?.fromMe) continue;
+
+      const jid = message.key?.remoteJid;
+
+      if (!jid) continue;
+
+      // Ignorer les statuts WhatsApp.
+      if (jid === 'status@broadcast') continue;
+
+      const estGroupe = jid.endsWith('@g.us');
+      const texteOriginal = extraireTexteMessage(message);
+      const contexte = extraireContexte(message);
+      const media = extraireMedia(message);
+
+      const expediteur =
+        message.key?.participant ||
+        message.key?.remoteJid ||
+        '';
+
+      const botId = sock.user?.id || '';
+
+      const reponseAuBot = Boolean(
+        contexte?.participant &&
+        memeIdentifiant(contexte.participant, botId)
+      );
+
+      const mentionBot = /@?hbot1\b|@?hbot\b/i.test(
+        texteOriginal
+      );
+
+      const commandeDirecte = estCommandeDirecte(
+        texteOriginal
+      );
+
+      // Dans un groupe, ne traiter que les messages qui s'adressent
+      // au bot. Cela évite de télécharger tous les médias du groupe.
+      if (
+        estGroupe &&
+        !mentionBot &&
+        !reponseAuBot &&
+        !commandeDirecte
+      ) {
+        continue;
+      }
+
+      // Les messages sans texte et sans média ne nécessitent pas de réponse.
+      if (!texteOriginal && !media) continue;
+
+      const texteNettoye = retirerMentionBot(
+        texteOriginal
+      );
+
+      // Commandes texte seulement.
+      if (texteNettoye.startsWith('!')) {
+        const commandeTraitee = await traiterCommande(
+          texteNettoye,
+          jid,
+          sock,
+          message
+        );
+
+        if (commandeTraitee) continue;
+      }
+
+      const chatId = estGroupe
+        ? `${jid}:${expediteur}`
+        : jid;
+
+      let promptIA = texteNettoye;
+      let estMessageVocal = false;
+
+      // --------------------------------------------------------
+      // MESSAGE VOCAL / AUDIO
+      // --------------------------------------------------------
+
+      if (media?.type === 'audio') {
+        estMessageVocal = true;
+
+        if (!groq) {
+          await sock.sendMessage(jid, {
+            text: '⚠️ La transcription audio est indisponible : la clé API Groq n’est pas configurée.'
+          });
+          continue;
+        }
+
+        await sock.sendMessage(
+          jid,
+          { text: '🎧 Je t’écoute, un instant…' },
+          { quoted: message }
+        ).catch(() => {});
+
+        const audioBuffer = await telechargerAudio(
+          media.message,
+          media.message.mimetype?.startsWith('audio/')
+            ? 'audio'
+            : 'document'
+        );
+
+        const extension = media.mime.includes('ogg')
+          ? 'ogg'
+          : media.mime.includes('mpeg')
+            ? 'mp3'
+            : media.mime.includes('mp4')
+              ? 'm4a'
+              : media.mime.includes('wav')
+                ? 'wav'
+                : 'audio';
+
+        const transcription = await transcrireAudio(
+          audioBuffer,
+          `message.${extension}`,
+          media.mime
+        );
+
+        if (!transcription?.trim()) {
+          await sock.sendMessage(jid, {
+            text: 'Je n’ai pas réussi à comprendre ce message vocal. Peux-tu essayer de le renvoyer plus clairement ?'
+          });
+          continue;
+        }
+
+        promptIA = transcription.trim();
+      }
+
+      // --------------------------------------------------------
+      // IMAGE
+      // --------------------------------------------------------
+
+      else if (media?.type === 'image') {
+        if (!groq) {
+          await sock.sendMessage(jid, {
+            text: '⚠️ L’analyse d’image est indisponible : la clé API Groq n’est pas configurée.'
+          });
+          continue;
+        }
+
+        const imageBuffer = await telechargerMedia(
+          media.message,
+          'image'
+        );
+
+        const question =
+          texteNettoye ||
+          'Décris cette image avec précision et explique les éléments importants que tu remarques.';
+
+        const reponseImage = await analyserImage(
+          imageBuffer,
+          media.mime,
+          question
+        );
+
+        await sock.sendMessage(
+          jid,
+          { text: reponseImage },
+          { quoted: message }
+        );
+
+        continue;
+      }
+
+      // --------------------------------------------------------
+      // VIDÉO
+      // --------------------------------------------------------
+
+      else if (media?.type === 'video') {
+        if (!groq) {
+          await sock.sendMessage(jid, {
+            text: '⚠️ L’analyse de vidéo est indisponible : la clé API Groq n’est pas configurée.'
+          });
+          continue;
+        }
+
+        const videoBuffer = await telechargerMedia(
+          media.message,
+          'video'
+        );
+
+        const question =
+          texteNettoye ||
+          'Décris les scènes visibles, les personnes ou objets et les actions importantes dans cette vidéo.';
+
+        const reponseVideo = await analyserVideo(
+          videoBuffer,
+          question
+        );
+
+        await sock.sendMessage(
+          jid,
+          { text: reponseVideo },
+          { quoted: message }
+        );
+
+        continue;
+      }
+
+      // --------------------------------------------------------
+      // TEXTE NORMAL
+      // --------------------------------------------------------
+
+      if (!promptIA?.trim()) {
+        if (estGroupe) continue;
+
+        promptIA =
+          'Bonjour ! Comment puis-je t’aider ?';
+      }
+
+      const reponse = await genererIA(
+        promptIA,
+        chatId
+      );
+
+      if (!reponse?.trim()) {
+        await sock.sendMessage(jid, {
+          text: 'Désolé, je n’ai pas réussi à produire une réponse. Réessaie dans un instant.'
+        });
+        continue;
+      }
+
+      // Pour un message vocal, envoyer une réponse audio si activé.
+      if (estMessageVocal && VOICE_REPLY_ENABLED) {
+        const vocalEnvoye = await envoyerVocal(
+          sock,
+          jid,
+          reponse,
+          message
+        ).catch((erreur) => {
+          console.error(
+            'Erreur réponse vocale :',
+            erreur.message
+          );
+          return false;
+        });
+
+        // Si la génération du vocal échoue, envoyer au moins le texte.
+        if (!vocalEnvoye) {
+          await sock.sendMessage(
+            jid,
+            { text: reponse },
+            { quoted: message }
+          );
+        } else {
+          // Garder également une réponse écrite pour faciliter la lecture.
+          await sock.sendMessage(
+            jid,
+            { text: reponse },
+            { quoted: message }
+          );
+        }
+      } else {
+        await sock.sendMessage(
+          jid,
+          { text: reponse },
+          { quoted: message }
+        );
+      }
+    } catch (erreur) {
+      console.error(
+        'Erreur traitement message :',
+        erreur?.stack || erreur
+      );
+
+      const jid = message.key?.remoteJid;
+
+      if (jid && jid !== 'status@broadcast') {
+        await sock.sendMessage(jid, {
+          text: '⚠️ Une erreur est survenue pendant le traitement de ton message. Réessaie dans un instant.'
+        }).catch(() => {});
+      }
+    }
+  }
+}
+
+// ------------------------------------------------------------
+// CONNEXION WHATSAPP ET QR CODE
+// ------------------------------------------------------------
+
+let connexionEnCours = false;
+
+async function connectToWhatsApp() {
+  if (connexionEnCours) return;
+
+  connexionEnCours = true;
+  connectionGeneration++;
+
+  const generation = connectionGeneration;
+
+  try {
+    const { state, saveCreds } =
+      await useMultiFileAuthState('auth_info_baileys');
+
+    const { version } = await fetchLatestBaileysVersion();
+
+    const sock = makeWASocket({
+      version,
+      auth: state,
+      logger: pino({ level: 'silent' }),
+      printQRInTerminal: false,
+      browser: ['Hbot1', 'Chrome', '1.0.0'],
+      markOnlineOnConnect: false,
+      syncFullHistory: false,
+      connectTimeoutMs: 60000,
+      defaultQueryTimeoutMs: 60000,
+      keepAliveIntervalMs: 30000
+    });
+
+    sockInstance = sock;
+
+    sock.ev.on('creds.update', saveCreds);
+
+    sock.ev.on('connection.update', async (update) => {
+      const {
+        connection,
+        lastDisconnect,
+        qr
+      } = update;
+
+      if (generation !== connectionGeneration) return;
+
+      if (qr) {
+        currentQrImage = await QRCode.toDataURL(qr)
+          .catch((erreur) => {
+            console.error(
+              'Erreur création QR :',
+              erreur.message
+            );
+            return null;
+          });
+
+        isConnected = false;
+
+        console.log(
+          '📱 Scanne le QR code depuis WhatsApp > Appareils connectés.'
+        );
+      }
+
+      if (connection === 'open') {
+        isConnected = true;
+        currentQrImage = null;
+
+        console.log(`✅ ${BOT_NAME} est connecté à WhatsApp.`);
+      }
+
+      if (connection === 'close') {
+        isConnected = false;
+        currentQrImage = null;
+
+        const code = new Boom(
+          lastDisconnect?.error
+        )?.output?.statusCode;
+
+        const deconnexionVolontaire =
+          code === DisconnectReason.loggedOut;
+
+        console.log(
+          'Connexion WhatsApp fermée. Code :',
+          code
+        );
+
+        if (deconnexionVolontaire) {
+          console.error(
+            '❌ Session déconnectée. Supprime le dossier auth_info_baileys et redémarre pour scanner un nouveau QR.'
+          );
+          connexionEnCours = false;
+          return;
+        }
+
+        connexionEnCours = false;
+
+        setTimeout(() => {
+          if (generation === connectionGeneration) {
+            connectToWhatsApp().catch((erreur) => {
+              console.error(
+                'Erreur reconnexion :',
+                erreur.message
+              );
+            });
+          }
+        }, 5000);
+
+        return;
+      }
+    });
+
+    sock.ev.on('messages.upsert', async ({ messages, type }) => {
+      if (type !== 'notify') return;
+
+      await traiterMessages(sock, messages);
+    });
+
+    connexionEnCours = false;
+  } catch (erreur) {
+    connexionEnCours = false;
+
+    console.error(
+      '❌ Erreur de connexion WhatsApp :',
+      erreur?.stack || erreur
+    );
+
+    setTimeout(() => {
+      connectToWhatsApp().catch(console.error);
+    }, 10000);
+  }
+}
+
+// ------------------------------------------------------------
+// DÉMARRAGE
+// ------------------------------------------------------------
+
+connectToWhatsApp().catch((erreur) => {
+  console.error(
+    'Erreur démarrage Hbot1 :',
+    erreur?.stack || erreur
+  );
+});
