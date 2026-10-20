@@ -152,19 +152,18 @@ cultivé, serviable, bienveillant et parfois drôle.
 IDENTITÉ :
 - Tu es ${BOT_NAME}.
 - Tu as été créé et développé par ${CREATOR_NAME}.
-- Si on te demande qui t'a créé, réponds clairement :
+- Si on te demande qui t'a créé, réponds :
   "Je suis ${BOT_NAME}, créé et développé par ${CREATOR_NAME}."
 - Tu ne prétends jamais être un être humain.
 
 LANGUE ET STYLE :
 - Réponds principalement en français simple et naturel.
 - Adapte la longueur de ta réponse à la question.
-- Sois naturel, comme un grand frère proche des jeunes,
-  sans supposer le genre de la personne.
+- Sois naturel, proche des jeunes, sans supposer le genre
+  de la personne.
 - Évite les réponses trop longues, répétitives ou robotiques.
 - Utilise les emojis avec modération.
-- Si le message contient des fautes, comprends l'intention sans
-  critiquer la personne.
+- Comprends les fautes sans critiquer la personne.
 
 DOMAINES :
 - Aide scolaire et explications générales.
@@ -174,12 +173,9 @@ DOMAINES :
 - Église des Assemblées de Dieu - Temple de la Restauration Divine.
 
 FIABILITÉ :
-- N'invente pas des faits, des dates, des montants ou des résultats.
+- N'invente pas de faits, de dates, de montants ou de résultats.
 - Si tu ne connais pas une information, dis-le honnêtement.
-- Pour les informations récentes, utilise la recherche Internet
-  lorsqu'elle est disponible.
-- Ne prétends jamais avoir envoyé un message ou effectué une action
-  que tu n'as pas réellement effectuée.
+- Ne prétends jamais avoir effectué une action non réalisée.
 
 MESSAGES VOCAUX :
 - Réponds directement au contenu du message transcrit.
@@ -260,7 +256,7 @@ function nettoyerMention(texte = '') {
 }
 
 // ======================================================
-// IDENTIFIANT DU BOT
+// IDENTIFICATION DU BOT
 // ======================================================
 
 function obtenirJidBot() {
@@ -270,17 +266,16 @@ function obtenirJidBot() {
 function estMentionBot(message, texte = '') {
   const botJid = obtenirJidBot();
 
-  if (!botJid) return false;
+  const contenu = message?.message || {};
 
   const contexte =
-    message?.message?.extendedTextMessage?.contextInfo ||
-    message?.message?.imageMessage?.contextInfo ||
-    message?.message?.videoMessage?.contextInfo ||
-    message?.message?.documentMessage?.contextInfo ||
+    contenu.extendedTextMessage?.contextInfo ||
+    contenu.imageMessage?.contextInfo ||
+    contenu.videoMessage?.contextInfo ||
+    contenu.documentMessage?.contextInfo ||
     {};
 
   const mentions = contexte.mentionedJid || [];
-
   const botNumero = extraireNumeroJid(botJid);
 
   const mentionDirecte = mentions.some(
@@ -288,23 +283,34 @@ function estMentionBot(message, texte = '') {
   );
 
   const texteNormalise = normaliserTexte(texte);
-  const nomNormalise = normaliserTexte(BOT_NAME);
 
-  const nomDansTexte = new RegExp(
-    `(^|\\s)${nomNormalise.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}([\\s,:!?]|$)`,
-    'i'
-  ).test(texteNormalise);
+  const nomsPossibles = [
+    BOT_NAME,
+    'Hbot',
+    'Hbot1'
+  ];
+
+  const nomDansTexte = nomsPossibles.some(nom => {
+    const nomNormalise = normaliserTexte(nom);
+
+    const expression = new RegExp(
+      `(^|\\s)${nomNormalise.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}([\\s,:!?]|$)`,
+      'i'
+    );
+
+    return expression.test(texteNormalise);
+  });
 
   return mentionDirecte || nomDansTexte;
 }
 
 // ======================================================
-// APPEL DE GROQ
+// INTELLIGENCE ARTIFICIELLE GROQ
 // ======================================================
 
 async function genererIA(chatId, texte, options = {}) {
   if (!groq) {
-    return 'Désolé, mon service d’intelligence artificielle n’est pas configuré. Réessaie plus tard.';
+    return 'Désolé, mon service d’intelligence artificielle n’est pas configuré.';
   }
 
   const historique = getHistory(chatId);
@@ -361,9 +367,10 @@ async function genererIA(chatId, texte, options = {}) {
       'Erreur Groq.'
     );
 
-    return 'Je rencontre un petit problème pour réfléchir à ta question. Réessaie dans un instant.';
+    return 'Je rencontre un petit problème pour répondre. Réessaie dans un instant.';
   }
 }
+
 // ======================================================
 // TÉLÉCHARGEMENT DES MÉDIAS WHATSAPP
 // ======================================================
@@ -401,7 +408,7 @@ async function telechargerMedia(mediaMessage, type = 'image') {
 }
 
 // ======================================================
-// TRANSCRIPTION AUDIO AVEC GROQ WHISPER
+// TRANSCRIPTION AUDIO WHISPER
 // ======================================================
 
 async function transcrireAudio(
@@ -476,7 +483,7 @@ async function genererAudioElevenLabs(texte) {
 }
 
 // ======================================================
-// CONVERSION MP3 EN OGG OPUS AVEC FFMPEG
+// CONVERSION MP3 EN OGG OPUS
 // ======================================================
 
 async function convertirMp3EnOgg(mp3Buffer) {
@@ -520,7 +527,9 @@ async function convertirMp3EnOgg(mp3Buffer) {
           resolve();
         } else {
           reject(
-            new Error(`Erreur FFmpeg (${code}): ${erreur.slice(-500)}`)
+            new Error(
+              `Erreur FFmpeg (${code}): ${erreur.slice(-500)}`
+            )
           );
         }
       });
@@ -536,7 +545,7 @@ async function convertirMp3EnOgg(mp3Buffer) {
 }
 
 // ======================================================
-// ENVOI D'UNE RÉPONSE VOCALE
+// ENVOI VOCAL
 // ======================================================
 
 async function envoyerVocal(sock, jid, texte) {
@@ -657,10 +666,15 @@ async function extraireImagesVideo(buffer) {
         processus.on('error', reject);
 
         processus.on('close', code => {
-          if (code === 0) resolve();
-          else reject(
-            new Error(`Extraction image impossible: ${erreur.slice(-300)}`)
-          );
+          if (code === 0) {
+            resolve();
+          } else {
+            reject(
+              new Error(
+                `Extraction image impossible: ${erreur.slice(-300)}`
+              )
+            );
+          }
         });
       });
 
@@ -734,6 +748,10 @@ async function analyserImage(buffer, question = '') {
 // ======================================================
 
 async function analyserVideo(buffer, question = '') {
+  if (!groq) {
+    return 'L’analyse vidéo n’est pas disponible actuellement.';
+  }
+
   try {
     const images = await extraireImagesVideo(buffer);
 
@@ -783,6 +801,7 @@ async function analyserVideo(buffer, question = '') {
     return 'Je n’ai pas réussi à analyser cette vidéo. Vérifie le format et la disponibilité du modèle de vision.';
   }
 }
+
 // ======================================================
 // EXTRACTION DES MESSAGES WHATSAPP
 // ======================================================
@@ -901,7 +920,7 @@ function texteProgrammeMois() {
     '',
     'Pour obtenir les dates exactes des activités du mois, consulte les annonces officielles de l’église.',
     '',
-    '⚠️ Je ne veux pas inventer de dates ou d’horaires qui n’ont pas été confirmés.'
+    '⚠️ Je ne veux pas inventer de dates ou d’horaires non confirmés.'
   ].join('\n');
 }
 
@@ -924,8 +943,7 @@ function obtenirDateAbidjan(date = new Date()) {
 }
 
 function getProgrammeDuDimanche() {
-  const maintenant = new Date();
-  const dateAbidjan = obtenirDateAbidjan(maintenant);
+  const dateAbidjan = obtenirDateAbidjan();
 
   const dateLocale = new Date(Date.UTC(
     dateAbidjan.annee,
@@ -960,6 +978,108 @@ function getProgrammeDuDimanche() {
 }
 
 // ======================================================
+// COTISATIONS : OUTILS DE LECTURE DES DATES
+// ======================================================
+
+// Ces fonctions lisent les dates existantes sans modifier Firebase.
+
+function convertirDateCotisation(valeur) {
+  if (valeur === null || valeur === undefined || valeur === '') {
+    return null;
+  }
+
+  try {
+    // Timestamp Firestore
+    if (typeof valeur.toDate === 'function') {
+      const date = valeur.toDate();
+
+      return Number.isNaN(date.getTime()) ? null : date;
+    }
+
+    // Objet Timestamp sérialisé
+    if (
+      typeof valeur === 'object' &&
+      Number.isFinite(valeur.seconds)
+    ) {
+      const date = new Date(valeur.seconds * 1000);
+
+      return Number.isNaN(date.getTime()) ? null : date;
+    }
+
+    // Date JavaScript
+    if (valeur instanceof Date) {
+      return Number.isNaN(valeur.getTime()) ? null : valeur;
+    }
+
+    // Horodatage numérique
+    if (typeof valeur === 'number') {
+      const date = new Date(
+        valeur < 1000000000000 ? valeur * 1000 : valeur
+      );
+
+      return Number.isNaN(date.getTime()) ? null : date;
+    }
+
+    // Texte date
+    if (typeof valeur === 'string') {
+      const date = new Date(valeur);
+
+      return Number.isNaN(date.getTime()) ? null : date;
+    }
+  } catch (error) {
+    logger.warn(
+      { error: error.message },
+      'Date de cotisation illisible.'
+    );
+  }
+
+  return null;
+}
+
+function obtenirDateTransaction(data) {
+  const champsDate = [
+    'timestamp',
+    'date',
+    'createdAt',
+    'created_at',
+    'createdOn',
+    'dateCreation',
+    'date_cotisation'
+  ];
+
+  for (const champ of champsDate) {
+    const date = convertirDateCotisation(data[champ]);
+
+    if (date) return date;
+  }
+
+  return null;
+}
+
+function formaterDateCotisation(date) {
+  if (!date) return 'Date inconnue';
+
+  const parties = new Intl.DateTimeFormat('en-GB', {
+    timeZone: 'Africa/Abidjan',
+    day: '2-digit',
+    month: '2-digit',
+    year: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hourCycle: 'h23'
+  }).formatToParts(date);
+
+  const valeur = type =>
+    parties.find(partie => partie.type === type)?.value || '00';
+
+  return (
+    `${valeur('day')}/${valeur('month')}/${valeur('year')} ` +
+    `${valeur('hour')}:${valeur('minute')}:${valeur('second')}`
+  );
+}
+
+// ======================================================
 // RAPPORT DES COTISATIONS FIREBASE
 // ======================================================
 
@@ -969,6 +1089,7 @@ async function getCotisationsReport() {
   }
 
   try {
+    // On conserve la collection Firebase existante.
     const resultat = await db
       .collection('transactions')
       .limit(100)
@@ -981,15 +1102,35 @@ async function getCotisationsReport() {
     const transactions = resultat.docs.map(doc => {
       const data = doc.data();
 
+      const nom =
+        data.name ||
+        data.memberName ||
+        data.nom ||
+        data.member ||
+        data.membre ||
+        'Membre inconnu';
+
+      const montantBrut =
+        data.amount ??
+        data.montant ??
+        data.amountFCFA ??
+        data.montantFCFA ??
+        0;
+
+      const montant = Number(montantBrut);
+
+      const date = obtenirDateTransaction(data);
+
       return {
-        nom: data.name || data.memberName || data.nom || 'Membre inconnu',
-        montant: Number(
-          data.amount ?? data.montant ?? 0
-        ),
-        date: data.date || data.createdAt || null
+        id: doc.id,
+        nom: String(nom),
+        montant: Number.isFinite(montant) ? montant : 0,
+        date
       };
     });
 
+    // Joanna reste toujours en première position.
+    // Les autres cotisations sont classées chronologiquement.
     transactions.sort((a, b) => {
       const aJoanna = normaliserTexte(a.nom).includes('joanna');
       const bJoanna = normaliserTexte(b.nom).includes('joanna');
@@ -997,42 +1138,62 @@ async function getCotisationsReport() {
       if (aJoanna && !bJoanna) return -1;
       if (!aJoanna && bJoanna) return 1;
 
-      return a.nom.localeCompare(b.nom, 'fr');
+      if (a.date && b.date) {
+        return a.date.getTime() - b.date.getTime();
+      }
+
+      if (a.date && !b.date) return -1;
+      if (!a.date && b.date) return 1;
+
+      return 0;
     });
 
-    const total = transactions.reduce(
-      (somme, transaction) => somme + transaction.montant,
-      0
-    );
+    const lignes = transactions.map((transaction, index) => {
+      const nomNormalise = normaliserTexte(transaction.nom);
 
-    const lignes = transactions.map(transaction =>
-      `• ${transaction.nom} : ${transaction.montant.toLocaleString('fr-FR')} FCFA`
-    );
+      const estJoanna =
+        nomNormalise.includes('joanna');
+
+      const symbole = estJoanna ? '🥇' : '✅';
+
+      const dateFormatee =
+        formaterDateCotisation(transaction.date);
+
+      return (
+        `${symbole} *${transaction.nom}* : ` +
+        `+${transaction.montant.toLocaleString('fr-FR')} FCFA ` +
+        `_${'('}${dateFormatee}${')'}_`
+      );
+    });
 
     return [
-      '📊 *RAPPORT DES COTISATIONS*',
+      '📊 *CLASSEMENT DES COTISATIONS* 🪙',
       '',
       ...lignes,
       '',
-      `*Total enregistré : ${total.toLocaleString('fr-FR')} FCFA*`,
-      '',
-      '⚠️ Ce rapport dépend des champs réellement enregistrés dans Firebase.'
+      '💡 Merci pour votre fidélité ! 🙏✨'
     ].join('\n');
   } catch (error) {
     logger.error(
-      { error: error.message },
+      { error: error.message, stack: error.stack },
       'Erreur rapport cotisations.'
     );
 
-    return 'Impossible de récupérer le rapport des cotisations pour le moment.';
+    return 'Impossible de récupérer le classement des cotisations pour le moment.';
   }
 }
 
 // ======================================================
-// COMMANDES
+// COMMANDES WHATSAPP
 // ======================================================
 
-async function traiterCommande(texte, jid, sock, message, chatId) {
+async function traiterCommande(
+  texte,
+  jid,
+  sock,
+  message,
+  chatId
+) {
   const commande = normaliserTexte(texte).split(/\s+/)[0];
 
   switch (commande) {
@@ -1045,7 +1206,9 @@ async function traiterCommande(texte, jid, sock, message, chatId) {
         '!id — Affiche l’identifiant du groupe ou du chat',
         '!resetia — Réinitialise ton historique de conversation',
         '!programme — Affiche les informations du programme',
-        '!cotisations — Affiche le rapport Firebase',
+        '!cotisation — Affiche le classement des cotisations',
+        '!cotisations — Affiche le classement des cotisations',
+        '!c — Affiche le classement des cotisations',
         '',
         'Tu peux aussi me poser directement tes questions.'
       ].join('\n');
@@ -1058,9 +1221,13 @@ async function traiterCommande(texte, jid, sock, message, chatId) {
       return '✅ Ton historique de conversation a été réinitialisé.';
 
     case '!programme':
-      return texteProgrammeMois() + '\n\n' + getProgrammeDuDimanche();
+      return texteProgrammeMois() +
+        '\n\n' +
+        getProgrammeDuDimanche();
 
+    case '!cotisation':
     case '!cotisations':
+    case '!c':
       return await getCotisationsReport();
 
     case '!setprogramme':
@@ -1072,7 +1239,7 @@ async function traiterCommande(texte, jid, sock, message, chatId) {
 }
 
 // ======================================================
-// TRAITEMENT DES MESSAGES
+// TRAITEMENT DES MESSAGES WHATSAPP
 // ======================================================
 
 async function traiterMessages(sock, message) {
@@ -1082,13 +1249,11 @@ async function traiterMessages(sock, message) {
   if (message.key?.fromMe) return;
 
   const expediteur =
-    message.key?.participant ||
-    jid;
+    message.key?.participant || jid;
 
-  const cleMessage =
-    message.key?.id
-      ? `${jid}:${message.key.id}`
-      : null;
+  const cleMessage = message.key?.id
+    ? `${jid}:${message.key.id}`
+    : null;
 
   if (cleMessage && processingMessages.has(cleMessage)) {
     return;
@@ -1105,17 +1270,15 @@ async function traiterMessages(sock, message) {
 
     const mentionBot = estMentionBot(message, texteOriginal);
     const reponseBot = reponseAuBot(message);
-
     const commande = estCommandeDirecte(texteOriginal);
 
-    // Dans un groupe, ne pas répondre à toutes les conversations.
+    // Dans les groupes, éviter de répondre à toutes les conversations.
     if (groupe && !mentionBot && !reponseBot && !commande) {
       return;
     }
 
     const chatId = creerCleConversation(jid, expediteur);
 
-    // Commandes commençant par !
     if (commande) {
       const reponseCommande = await traiterCommande(
         texteOriginal,
@@ -1126,17 +1289,17 @@ async function traiterMessages(sock, message) {
       );
 
       if (reponseCommande) {
-        await sock.sendMessage(jid, {
-          text: reponseCommande
-        }, {
-          quoted: message
-        });
+        await sock.sendMessage(
+          jid,
+          { text: reponseCommande },
+          { quoted: message }
+        );
 
         return;
       }
     }
 
-    // Réponse à une demande d'identité sans commande.
+    // Identification
     if (
       texteNormalise === 'qui es tu' ||
       texteNormalise === 'qui est hbot1' ||
@@ -1144,11 +1307,13 @@ async function traiterMessages(sock, message) {
       texteNormalise === 'qui t a cree' ||
       texteNormalise === 'qui est ton createur'
     ) {
-      await sock.sendMessage(jid, {
-        text: `Je suis ${BOT_NAME}, créé et développé par ${CREATOR_NAME}. 😊`
-      }, {
-        quoted: message
-      });
+      await sock.sendMessage(
+        jid,
+        {
+          text: `Je suis ${BOT_NAME}, créé et développé par ${CREATOR_NAME}. 😊`
+        },
+        { quoted: message }
+      );
 
       return;
     }
@@ -1156,7 +1321,7 @@ async function traiterMessages(sock, message) {
     const media = extraireMedia(message);
 
     // --------------------------------------------------
-    // AUDIO / MESSAGE VOCAL
+    // MESSAGE VOCAL
     // --------------------------------------------------
 
     if (media?.type === 'audio') {
@@ -1166,20 +1331,29 @@ async function traiterMessages(sock, message) {
           'audio'
         );
 
+        const mimetype =
+          media.message.mimetype || 'audio/ogg';
+
+        const filename = mimetype.includes('mpeg')
+          ? 'audio.mp3'
+          : mimetype.includes('mp4')
+            ? 'audio.m4a'
+            : 'audio.ogg';
+
         const transcription = await transcrireAudio(
           buffer,
-          media.message.mimetype?.includes('mpeg')
-            ? 'audio.mp3'
-            : 'audio.ogg',
-          media.message.mimetype || 'audio/ogg'
+          filename,
+          mimetype
         );
 
         if (!transcription) {
-          await sock.sendMessage(jid, {
-            text: 'Je n’ai pas réussi à comprendre ce message vocal. Peux-tu le renvoyer ?'
-          }, {
-            quoted: message
-          });
+          await sock.sendMessage(
+            jid,
+            {
+              text: 'Je n’ai pas réussi à comprendre ce message vocal. Peux-tu le renvoyer ?'
+            },
+            { quoted: message }
+          );
 
           return;
         }
@@ -1196,11 +1370,11 @@ async function traiterMessages(sock, message) {
         );
 
         if (!vocalEnvoye) {
-          await sock.sendMessage(jid, {
-            text: reponse
-          }, {
-            quoted: message
-          });
+          await sock.sendMessage(
+            jid,
+            { text: reponse },
+            { quoted: message }
+          );
         }
 
         return;
@@ -1210,11 +1384,13 @@ async function traiterMessages(sock, message) {
           'Erreur traitement audio.'
         );
 
-        await sock.sendMessage(jid, {
-          text: 'Je n’arrive pas à traiter ce message vocal pour le moment. Réessaie avec un audio plus court.'
-        }, {
-          quoted: message
-        });
+        await sock.sendMessage(
+          jid,
+          {
+            text: 'Je n’arrive pas à traiter ce message vocal pour le moment. Réessaie avec un audio plus court.'
+          },
+          { quoted: message }
+        );
 
         return;
       }
@@ -1239,11 +1415,11 @@ async function traiterMessages(sock, message) {
           question
         );
 
-        await sock.sendMessage(jid, {
-          text: reponse
-        }, {
-          quoted: message
-        });
+        await sock.sendMessage(
+          jid,
+          { text: reponse },
+          { quoted: message }
+        );
 
         return;
       } catch (error) {
@@ -1252,11 +1428,13 @@ async function traiterMessages(sock, message) {
           'Erreur traitement image.'
         );
 
-        await sock.sendMessage(jid, {
-          text: 'Je n’arrive pas à lire cette image. Vérifie son format ou envoie une image plus légère.'
-        }, {
-          quoted: message
-        });
+        await sock.sendMessage(
+          jid,
+          {
+            text: 'Je n’arrive pas à lire cette image. Vérifie son format ou envoie une image plus légère.'
+          },
+          { quoted: message }
+        );
 
         return;
       }
@@ -1281,11 +1459,11 @@ async function traiterMessages(sock, message) {
           question
         );
 
-        await sock.sendMessage(jid, {
-          text: reponse
-        }, {
-          quoted: message
-        });
+        await sock.sendMessage(
+          jid,
+          { text: reponse },
+          { quoted: message }
+        );
 
         return;
       } catch (error) {
@@ -1294,11 +1472,13 @@ async function traiterMessages(sock, message) {
           'Erreur traitement vidéo.'
         );
 
-        await sock.sendMessage(jid, {
-          text: 'Je n’arrive pas à analyser cette vidéo. Essaie avec une vidéo plus courte et plus légère.'
-        }, {
-          quoted: message
-        });
+        await sock.sendMessage(
+          jid,
+          {
+            text: 'Je n’arrive pas à analyser cette vidéo. Essaie avec une vidéo plus courte et plus légère.'
+          },
+          { quoted: message }
+        );
 
         return;
       }
@@ -1311,12 +1491,25 @@ async function traiterMessages(sock, message) {
     let textePourIA = texteOriginal;
 
     if (groupe) {
-      textePourIA = nettoyerMention(textePourIA)
-        .replace(new RegExp(
-          BOT_NAME.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'),
-          'ig'
-        ), '')
-        .trim();
+      textePourIA = nettoyerMention(textePourIA);
+
+      const nomsPossibles = [
+        BOT_NAME,
+        'Hbot',
+        'Hbot1'
+      ];
+
+      for (const nom of nomsPossibles) {
+        textePourIA = textePourIA.replace(
+          new RegExp(
+            nom.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'),
+            'ig'
+          ),
+          ''
+        );
+      }
+
+      textePourIA = textePourIA.trim();
     }
 
     if (!textePourIA) {
@@ -1328,14 +1521,14 @@ async function traiterMessages(sock, message) {
       textePourIA
     );
 
-    await sock.sendMessage(jid, {
-      text: reponse
-    }, {
-      quoted: message
-    });
+    await sock.sendMessage(
+      jid,
+      { text: reponse },
+      { quoted: message }
+    );
   } catch (error) {
     logger.error(
-      { error: error.message },
+      { error: error.message, stack: error.stack },
       'Erreur générale traitement message.'
     );
   } finally {
@@ -1355,7 +1548,13 @@ app.get('/', async (req, res) => {
   let qrHtml = '<p>QR code indisponible pour le moment.</p>';
 
   if (currentQrImage && !isConnected) {
-    qrHtml = `<img src="${currentQrImage}" alt="QR WhatsApp" style="max-width:300px;width:100%">`;
+    qrHtml = `
+      <img
+        src="${currentQrImage}"
+        alt="QR WhatsApp"
+        style="max-width:300px;width:100%"
+      >
+    `;
   }
 
   res.status(200).send(`
@@ -1428,7 +1627,10 @@ const server = app.listen(PORT, '0.0.0.0', () => {
 
 async function envoyerMessageGroupe(texte) {
   if (!sockInstance || !isConnected) {
-    logger.warn('Message automatique ignoré : WhatsApp non connecté.');
+    logger.warn(
+      'Message automatique ignoré : WhatsApp non connecté.'
+    );
+
     return;
   }
 
@@ -1438,9 +1640,10 @@ async function envoyerMessageGroupe(texte) {
   }
 
   try {
-    await sockInstance.sendMessage(WHATSAPP_GROUP_ID, {
-      text: texte
-    });
+    await sockInstance.sendMessage(
+      WHATSAPP_GROUP_ID,
+      { text: texte }
+    );
 
     logger.info('Message automatique envoyé.');
   } catch (error) {
@@ -1452,7 +1655,7 @@ async function envoyerMessageGroupe(texte) {
 }
 
 // ======================================================
-// PROGRAMMATION DES RAPPELS
+// RAPPELS AUTOMATIQUES
 // ======================================================
 
 cron.schedule('30 6 * * *', async () => {
@@ -1463,8 +1666,10 @@ cron.schedule('30 6 * * *', async () => {
   timezone: 'Africa/Abidjan'
 });
 
+// Veillée : premier et dernier vendredi du mois.
 cron.schedule('0 14 * * 5', async () => {
   const date = obtenirDateAbidjan();
+
   const dateUtc = new Date(Date.UTC(
     date.annee,
     date.mois - 1,
@@ -1472,6 +1677,7 @@ cron.schedule('0 14 * * 5', async () => {
   ));
 
   const jour = dateUtc.getUTCDate();
+
   const dernierJour = new Date(
     Date.UTC(date.annee, date.mois, 0)
   ).getUTCDate();
@@ -1488,6 +1694,7 @@ cron.schedule('0 14 * * 5', async () => {
   timezone: 'Africa/Abidjan'
 });
 
+// Programme du week-end.
 cron.schedule('0 14 * * 5,6', async () => {
   await envoyerMessageGroupe(
     '⛪ *PROGRAMME DU WEEK-END*\n\nPréparons nos cœurs pour les activités spirituelles du week-end. Pour les horaires exacts, veuillez consulter les annonces officielles de l’église.'
@@ -1496,6 +1703,7 @@ cron.schedule('0 14 * * 5,6', async () => {
   timezone: 'Africa/Abidjan'
 });
 
+// Rappel des cotisations le samedi.
 cron.schedule('0 16 * * 6', async () => {
   await envoyerMessageGroupe(
     '💰 *RAPPEL DES COTISATIONS*\n\nN’oublions pas notre participation aux cotisations prévues pour le studio et l’agapé. Merci à chacun pour son engagement.'
@@ -1504,6 +1712,7 @@ cron.schedule('0 16 * * 6', async () => {
   timezone: 'Africa/Abidjan'
 });
 
+// Rappel du dimanche.
 cron.schedule('30 11 * * 0', async () => {
   await envoyerMessageGroupe(
     '🙏 *RAPPEL DU DIMANCHE*\n\nQue chacun se prépare pour le culte et les activités de l’église. Bon dimanche à tous !'
@@ -1512,16 +1721,16 @@ cron.schedule('30 11 * * 0', async () => {
   timezone: 'Africa/Abidjan'
 });
 
+// Classement hebdomadaire des cotisations.
 cron.schedule('0 17 * * 0', async () => {
   const rapport = await getCotisationsReport();
 
-  await envoyerMessageGroupe(
-    `📊 *RAPPORT HEBDOMADAIRE*\n\n${rapport}`
-  );
+  await envoyerMessageGroupe(rapport);
 }, {
   timezone: 'Africa/Abidjan'
 });
 
+// Message du dimanche soir.
 cron.schedule('0 20 * * 0', async () => {
   await envoyerMessageGroupe(
     '🌙 Bonne soirée à tous ! Que Dieu vous accorde une nuit paisible. N’oublions pas de garder un moment pour la prière.'
@@ -1587,6 +1796,7 @@ async function connectToWhatsApp() {
       if (qr) {
         try {
           currentQrImage = await QRCode.toDataURL(qr);
+
           logger.info(
             'QR code disponible sur la page web du bot.'
           );
@@ -1601,6 +1811,7 @@ async function connectToWhatsApp() {
       if (connection === 'open') {
         isConnected = true;
         currentQrImage = null;
+
         logger.info('WhatsApp connecté avec succès.');
       }
 
@@ -1621,8 +1832,9 @@ async function connectToWhatsApp() {
 
         if (deconnecte) {
           logger.error(
-            'Session déconnectée. Supprime les anciennes données de session uniquement si tu souhaites scanner un nouveau QR code.'
+            'Session déconnectée. Vérifie la session WhatsApp avant de la supprimer.'
           );
+
           return;
         }
 
@@ -1641,7 +1853,6 @@ async function connectToWhatsApp() {
 
     sock.ev.on('messages.upsert', async evenement => {
       if (generation !== connectionGeneration) return;
-
       if (evenement.type !== 'notify') return;
 
       for (const message of evenement.messages || []) {
