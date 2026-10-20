@@ -28,13 +28,16 @@ import { spawn } from 'child_process';
 // CONFIGURATION
 // ======================================================
 
-const PORT = Number(process.env.PORT || 3000);
+const PORT = Number(process.env.PORT || 10000);
 
-const BOT_NAME = process.env.BOT_NAME || 'Hbot1';
+const BOT_NAME = process.env.BOT_NAME || 'HBOT';
+
 const CREATOR_NAME =
-  process.env.CREATOR_NAME || 'Assamoi Yapi Hyppolite';
+  process.env.CREATOR_NAME ||
+  'Assamoi Yapi Hyppolite, informaticien développeur';
 
 const GROQ_API_KEY = process.env.GROQ_API_KEY || '';
+
 const GROQ_MODEL =
   process.env.GROQ_MODEL || 'openai/gpt-oss-120b';
 
@@ -44,9 +47,6 @@ const GROQ_VISION_MODEL =
 
 const WHISPER_MODEL =
   process.env.WHISPER_MODEL || 'whisper-large-v3-turbo';
-
-const WHISPER_LANGUAGE =
-  process.env.WHISPER_LANGUAGE || 'fr';
 
 const ELEVENLABS_API_KEY =
   process.env.ELEVENLABS_API_KEY || '';
@@ -58,8 +58,8 @@ const ELEVENLABS_MODEL =
   process.env.ELEVENLABS_MODEL || 'eleven_multilingual_v2';
 
 const VOICE_REPLY_ENABLED =
-  (process.env.VOICE_REPLY_ENABLED || 'true').toLowerCase() ===
-  'true';
+  String(process.env.VOICE_REPLY_ENABLED ?? 'true').toLowerCase()
+  === 'true';
 
 const WHATSAPP_GROUP_ID =
   process.env.WHATSAPP_GROUP_ID ||
@@ -67,33 +67,55 @@ const WHATSAPP_GROUP_ID =
 
 const MAX_HISTORY = 12;
 const MAX_CONVERSATIONS = 500;
+const MAX_GROUP_MEMORY = 120;
 
-const MAX_IMAGE_BYTES = 8 * 1024 * 1024;
-const MAX_VIDEO_BYTES = 20 * 1024 * 1024;
-const MAX_AUDIO_BYTES = 20 * 1024 * 1024;
+const MAX_AUDIO_SIZE = 20 * 1024 * 1024;
+const MAX_IMAGE_SIZE = 10 * 1024 * 1024;
 
-const AUTH_FOLDER = './auth_info_baileys';
+const AUTH_DIR = process.env.AUTH_DIR || './auth_info';
+
+const TIME_ZONE = 'Africa/Abidjan';
 
 const logger = pino({
   level: process.env.LOG_LEVEL || 'info'
 });
 
-const groq = GROQ_API_KEY
-  ? new Groq({ apiKey: GROQ_API_KEY })
-  : null;
+const app = express();
+
+app.use(express.json({ limit: '1mb' }));
 
 // ======================================================
 // ÉTAT DU BOT
 // ======================================================
 
-let currentQrImage = null;
-let isConnected = false;
-let sockInstance = null;
-let connectionGeneration = 0;
+let sock = null;
+let latestQR = null;
+let qrDataURL = null;
+
+let whatsappConnected = false;
 let connexionEnCours = false;
 
-const conversationHistory = new Map();
+let connectionGeneration = 0;
+let reconnectTimer = null;
+
+const conversations = new Map();
 const processingMessages = new Set();
+
+// ======================================================
+// GROQ
+// ======================================================
+
+let groq = null;
+
+if (GROQ_API_KEY) {
+  groq = new Groq({
+    apiKey: GROQ_API_KEY
+  });
+
+  console.log('✅ Clé Groq configurée.');
+} else {
+  console.warn('⚠️ GROQ_API_KEY absente.');
+}
 
 // ======================================================
 // FIREBASE
@@ -103,217 +125,328 @@ let db = null;
 
 try {
   if (!admin.apps.length) {
-    const cheminsPossibles = [
+    const candidates = [
       '/etc/secrets/serviceAccountKey.json',
       './serviceAccountKey.json'
     ];
 
-    let serviceAccount = null;
+    const serviceAccountPath = candidates.find(
+      file => existsSync(file)
+    );
 
-    for (const fichier of cheminsPossibles) {
-      if (existsSync(fichier)) {
-        serviceAccount = JSON.parse(
-          readFileSync(fichier, 'utf8')
-        );
-        break;
-      }
-    }
+    if (serviceAccountPath) {
+      const serviceAccount = JSON.parse(
+        readFileSync(serviceAccountPath, 'utf8')
+      );
 
-    if (serviceAccount) {
       admin.initializeApp({
         credential: admin.credential.cert(serviceAccount)
       });
 
-      db = admin.firestore();
-      logger.info('Firebase initialisé.');
+      console.log('✅ Firebase initialisé.');
+    } else if (process.env.FIREBASE_SERVICE_ACCOUNT_JSON) {
+      const serviceAccount = JSON.parse(
+        process.env.FIREBASE_SERVICE_ACCOUNT_JSON
+      );
+
+      admin.initializeApp({
+        credential: admin.credential.cert(serviceAccount)
+      });
+
+      console.log('✅ Firebase initialisé avec la variable d’environnement.');
     } else {
-      logger.warn(
-        'Firebase non configuré : fichier serviceAccountKey.json introuvable.'
+      console.warn(
+        '⚠️ Fichier de compte Firebase introuvable. Les cotisations seront indisponibles.'
       );
     }
-  } else {
+  }
+
+  if (admin.apps.length) {
     db = admin.firestore();
   }
 } catch (error) {
-  logger.error(
-    { error: error.message },
-    'Erreur initialisation Firebase.'
-  );
+  console.error('❌ Erreur Firebase :', error.message);
 }
 
 // ======================================================
-// PROMPT PRINCIPAL
+// IDENTITÉ ET INSTRUCTIONS DE L’IA
 // ======================================================
 
 const SYSTEM_PROMPT = `
-Tu es ${BOT_NAME}, un assistant WhatsApp intelligent, chaleureux,
-cultivé, serviable, bienveillant et parfois drôle.
+Tu es ${BOT_NAME}, un assistant WhatsApp intelligent,
+chaleureux, cultivé, bienveillant et naturel.
+
+Tu as été créé et développé par ${CREATOR_NAME}.
 
 IDENTITÉ :
-- Tu es ${BOT_NAME}.
-- Tu as été créé et développé par ${CREATOR_NAME}.
-- Si on te demande qui t'a créé, réponds :
-  "Je suis ${BOT_NAME}, créé et développé par ${CREATOR_NAME}."
-- Tu ne prétends jamais être un être humain.
+- Si quelqu'un demande qui tu es, présente-toi comme ${BOT_NAME}.
+- Si quelqu'un demande qui t'a créé, réponds :
+  « Je suis ${BOT_NAME}, créé et développé par ${CREATOR_NAME}. »
+- Tu es une intelligence artificielle, pas un être humain.
+- N'invente jamais des informations personnelles sur ton créateur.
 
-LANGUE ET STYLE :
+STYLE :
 - Réponds principalement en français simple et naturel.
+- Sois chaleureux, poli, parfois humoristique.
 - Adapte la longueur de ta réponse à la question.
-- Sois naturel, proche des jeunes, sans supposer le genre
-  de la personne.
-- Évite les réponses trop longues, répétitives ou robotiques.
+- Évite les réponses trop longues lorsque ce n'est pas nécessaire.
 - Utilise les emojis avec modération.
-- Comprends les fautes sans critiquer la personne.
+- Ne suppose jamais le sexe de la personne qui t'écrit.
+- Si un message contient des fautes, comprends son intention sans la ridiculiser.
 
-DOMAINES :
-- Aide scolaire et explications générales.
-- Technologie, programmation et informatique.
-- Vie quotidienne, conseils et organisation.
-- Explications bibliques lorsque cela est demandé.
-- Église des Assemblées de Dieu - Temple de la Restauration Divine.
+CONTEXTE :
+Tu peux aider avec les études, la technologie, la culture générale,
+la vie quotidienne, les explications bibliques et les questions pratiques.
+
+ÉGLISE :
+Lorsque c'est pertinent, réponds avec respect aux questions bibliques.
+Ne prétends pas connaître des informations qui ne t'ont pas été données.
+N'invente pas les horaires, les décisions ou les événements de l'église.
 
 FIABILITÉ :
-- N'invente pas de faits, de dates, de montants ou de résultats.
 - Si tu ne connais pas une information, dis-le honnêtement.
-- Ne prétends jamais avoir effectué une action non réalisée.
-
-MESSAGES VOCAUX :
-- Réponds directement au contenu du message transcrit.
-- Ne dis pas inutilement "selon votre transcription".
-
-GROUPES WHATSAPP :
-- Sois respectueux des membres.
-- Réponds à la question réellement posée.
+- Ne prétends pas avoir effectué une recherche Internet si ce n'est pas le cas.
+- Ne prétends pas avoir envoyé un fichier ou réalisé une action que tu n'as pas effectuée.
+- Respecte toujours la question posée.
 `;
 
 // ======================================================
-// HISTORIQUE DES CONVERSATIONS
+// OUTILS GÉNÉRAUX
 // ======================================================
 
-function getHistory(chatId) {
-  if (!conversationHistory.has(chatId)) {
-    conversationHistory.set(chatId, []);
-  }
-
-  return conversationHistory.get(chatId);
+function attendre(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-function resetHistory(chatId) {
-  conversationHistory.delete(chatId);
-}
-
-function limiterHistorique() {
-  while (conversationHistory.size > MAX_CONVERSATIONS) {
-    const premiereCle = conversationHistory.keys().next().value;
-
-    if (premiereCle === undefined) break;
-
-    conversationHistory.delete(premiereCle);
-  }
-}
-
-// ======================================================
-// UTILITAIRES
-// ======================================================
-
-function normaliserTexte(texte = '') {
+function nettoyerTexte(texte = '') {
   return String(texte)
-    .normalize('NFD')
-    .replace(/[\u0300-\u036f]/g, '')
-    .toLowerCase()
+    .replace(/\r/g, '')
+    .replace(/[ \t]+\n/g, '\n')
     .trim();
 }
 
-function nettoyerTexteVocal(texte = '') {
-  return String(texte)
-    .replace(/```[\s\S]*?```/g, ' ')
-    .replace(/`([^`]+)`/g, '$1')
-    .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
-    .replace(/https?:\/\/\S+/gi, ' ')
-    .replace(/[*_~>#]/g, '')
-    .replace(/[\u{1F300}-\u{1FAFF}]/gu, '')
-    .replace(/\s+/g, ' ')
-    .trim()
-    .slice(0, 1800);
+function obtenirDateAbidjan(date = new Date()) {
+  return new Intl.DateTimeFormat('fr-FR', {
+    timeZone: TIME_ZONE,
+    day: '2-digit',
+    month: '2-digit',
+    year: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false
+  }).format(date);
 }
 
-function estCommandeDirecte(texte = '') {
-  return String(texte).trim().startsWith('!');
+function obtenirMessageReel(message) {
+  let contenu = message?.message;
+
+  while (contenu) {
+    if (contenu.ephemeralMessage?.message) {
+      contenu = contenu.ephemeralMessage.message;
+      continue;
+    }
+
+    if (contenu.viewOnceMessage?.message) {
+      contenu = contenu.viewOnceMessage.message;
+      continue;
+    }
+
+    if (contenu.viewOnceMessageV2?.message) {
+      contenu = contenu.viewOnceMessageV2.message;
+      continue;
+    }
+
+    if (contenu.documentWithCaptionMessage?.message) {
+      contenu = contenu.documentWithCaptionMessage.message;
+      continue;
+    }
+
+    break;
+  }
+
+  return contenu || {};
 }
 
-function extraireNumeroJid(jid = '') {
-  return jid.split('@')[0].split(':')[0];
+function obtenirTexteMessage(message) {
+  const contenu = obtenirMessageReel(message);
+
+  return (
+    contenu.conversation ||
+    contenu.extendedTextMessage?.text ||
+    contenu.imageMessage?.caption ||
+    contenu.videoMessage?.caption ||
+    contenu.documentMessage?.caption ||
+    contenu.buttonsResponseMessage?.selectedDisplayText ||
+    contenu.listResponseMessage?.title ||
+    contenu.templateButtonReplyMessage?.selectedDisplayText ||
+    ''
+  ).trim();
 }
 
-function estJidGroupe(jid = '') {
-  return jid.endsWith('@g.us');
+function estCommande(texte = '') {
+  return /^!(aide|help|id|resetia|programme|cotisation|cotisations|c|setprogramme)\b/i
+    .test(texte.trim());
 }
 
-function nettoyerMention(texte = '') {
-  return String(texte)
-    .replace(/@\d+/g, '')
-    .trim();
+function extraireJidParticipant(message) {
+  return (
+    message?.key?.participant ||
+    message?.participant ||
+    ''
+  );
 }
 
-// ======================================================
-// IDENTIFICATION DU BOT
-// ======================================================
+function estMessageDeMoi(message) {
+  return message?.key?.fromMe === true;
+}
 
-function obtenirJidBot() {
-  return sockInstance?.user?.id || '';
+function estMessageDeGroupe(message) {
+  return String(message?.key?.remoteJid || '').endsWith('@g.us');
+}
+
+function obtenirConversationId(message) {
+  const jid = message?.key?.remoteJid || '';
+  const participant = extraireJidParticipant(message);
+
+  return estMessageDeGroupe(message)
+    ? `${jid}:${participant}`
+    : jid;
+}
+
+function obtenirNomExpediteur(message) {
+  return (
+    message?.pushName ||
+    message?.verifiedBizName ||
+    'Ami'
+  );
+}
+
+function obtenirJid(message) {
+  return message?.key?.remoteJid || '';
 }
 
 function estMentionBot(message, texte = '') {
-  const botJid = obtenirJidBot();
+  const contenu = obtenirMessageReel(message);
 
-  const contenu = message?.message || {};
+  const mentions =
+    contenu.extendedTextMessage?.contextInfo?.mentionedJid ||
+    contenu.imageMessage?.contextInfo?.mentionedJid ||
+    contenu.videoMessage?.contextInfo?.mentionedJid ||
+    [];
 
-  const contexte =
+  if (
+    mentions.some(jid =>
+      String(jid).includes('status')
+    )
+  ) {
+    return true;
+  }
+
+  const monJid = sock?.user?.id || '';
+  const monNumero = monJid.split(':')[0].split('@')[0];
+
+  const texteNormalise = texte.toLowerCase();
+
+  if (
+    monNumero &&
+    texteNormalise.includes(monNumero)
+  ) {
+    return true;
+  }
+
+  return /\b(hbot|bot)\b/i.test(texte);
+}
+
+function estReponseAuBot(message) {
+  const contenu = obtenirMessageReel(message);
+
+  const contextInfo =
     contenu.extendedTextMessage?.contextInfo ||
     contenu.imageMessage?.contextInfo ||
     contenu.videoMessage?.contextInfo ||
-    contenu.documentMessage?.contextInfo ||
-    {};
+    contenu.audioMessage?.contextInfo;
 
-  const mentions = contexte.mentionedJid || [];
-  const botNumero = extraireNumeroJid(botJid);
+  const stanzaId = contextInfo?.stanzaId;
 
-  const mentionDirecte = mentions.some(
-    jid => extraireNumeroJid(jid) === botNumero
-  );
+  if (!stanzaId) {
+    return false;
+  }
 
-  const texteNormalise = normaliserTexte(texte);
-
-  const nomsPossibles = [
-    BOT_NAME,
-    'Hbot',
-    'Hbot1'
-  ];
-
-  const nomDansTexte = nomsPossibles.some(nom => {
-    const nomNormalise = normaliserTexte(nom);
-
-    const expression = new RegExp(
-      `(^|\\s)${nomNormalise.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}([\\s,:!?]|$)`,
-      'i'
+  return contextInfo?.participant === sock?.user?.id ||
+    contextInfo?.participant?.startsWith(
+      sock?.user?.id?.split(':')[0] || '###'
     );
+}
 
-    return expression.test(texteNormalise);
-  });
+function estMessageAudio(message) {
+  const contenu = obtenirMessageReel(message);
 
-  return mentionDirecte || nomDansTexte;
+  return Boolean(
+    contenu.audioMessage ||
+    contenu.pttMessage
+  );
+}
+
+function estMessageImage(message) {
+  const contenu = obtenirMessageReel(message);
+
+  return Boolean(contenu.imageMessage);
+}
+
+function estMessageVideo(message) {
+  const contenu = obtenirMessageReel(message);
+
+  return Boolean(contenu.videoMessage);
 }
 
 // ======================================================
-// INTELLIGENCE ARTIFICIELLE GROQ
+// MÉMOIRE DES CONVERSATIONS
 // ======================================================
 
-async function genererIA(chatId, texte, options = {}) {
-  if (!groq) {
-    return 'Désolé, mon service d’intelligence artificielle n’est pas configuré.';
+function obtenirHistorique(conversationId) {
+  if (!conversations.has(conversationId)) {
+    conversations.set(conversationId, []);
   }
 
-  const historique = getHistory(chatId);
+  return conversations.get(conversationId);
+}
+
+function ajouterHistorique(conversationId, role, content) {
+  const historique = obtenirHistorique(conversationId);
+
+  historique.push({
+    role,
+    content
+  });
+
+  while (historique.length > MAX_HISTORY * 2) {
+    historique.shift();
+  }
+
+  if (conversations.size > MAX_CONVERSATIONS) {
+    const premiereCle = conversations.keys().next().value;
+
+    if (premiereCle) {
+      conversations.delete(premiereCle);
+    }
+  }
+}
+
+function reinitialiserHistorique(conversationId) {
+  conversations.delete(conversationId);
+}
+
+// ======================================================
+// RÉPONSE IA GROQ
+// ======================================================
+
+async function genererIA(texte, conversationId, options = {}) {
+  if (!groq) {
+    return 'Désolé, mon service d’intelligence artificielle n’est pas configuré pour le moment.';
+  }
+
+  const historique = obtenirHistorique(conversationId);
 
   const messages = [
     {
@@ -323,82 +456,119 @@ async function genererIA(chatId, texte, options = {}) {
     ...historique,
     {
       role: 'user',
-      content: String(texte).slice(0, 12000)
+      content: texte
     }
   ];
 
   try {
     const reponse = await groq.chat.completions.create({
-      model: options.vision ? GROQ_VISION_MODEL : GROQ_MODEL,
+      model: options.model || GROQ_MODEL,
       messages,
-      temperature: 0.7,
       max_completion_tokens: 1200
     });
 
-    const contenu =
-      reponse.choices?.[0]?.message?.content;
-
-    const texteReponse =
-      typeof contenu === 'string' && contenu.trim()
-        ? contenu.trim()
-        : 'Je n’ai pas réussi à préparer une réponse. Peux-tu reformuler ?';
-
-    historique.push(
-      {
-        role: 'user',
-        content: String(texte).slice(0, 12000)
-      },
-      {
-        role: 'assistant',
-        content: texteReponse
-      }
+    const resultat = nettoyerTexte(
+      reponse.choices?.[0]?.message?.content || ''
     );
 
-    while (historique.length > MAX_HISTORY * 2) {
-      historique.shift();
+    if (!resultat) {
+      return 'Je n’ai pas réussi à formuler une réponse. Peux-tu reformuler ta question ?';
     }
 
-    limiterHistorique();
+    ajouterHistorique(conversationId, 'user', texte);
+    ajouterHistorique(conversationId, 'assistant', resultat);
 
-    return texteReponse;
+    return resultat;
   } catch (error) {
-    logger.error(
-      { error: error.message },
-      'Erreur Groq.'
-    );
+    console.error('❌ Erreur Groq :', error.message);
 
-    return 'Je rencontre un petit problème pour répondre. Réessaie dans un instant.';
+    return 'Je rencontre actuellement un problème pour répondre. Réessaie dans un instant.';
   }
 }
 
 // ======================================================
-// TÉLÉCHARGEMENT DES MÉDIAS WHATSAPP
+// ENVOI DE MESSAGES WHATSAPP
 // ======================================================
 
-async function telechargerMedia(mediaMessage, type = 'image') {
-  const limites = {
-    image: MAX_IMAGE_BYTES,
-    video: MAX_VIDEO_BYTES,
-    audio: MAX_AUDIO_BYTES
-  };
+async function envoyerTexte(jid, texte, options = {}) {
+  if (!sock || !whatsappConnected) {
+    console.warn('⚠️ Envoi impossible : WhatsApp non connecté.');
+    return false;
+  }
 
-  const limite = limites[type] || MAX_IMAGE_BYTES;
+  try {
+    await sock.sendMessage(jid, {
+      text: String(texte),
+      ...options
+    });
 
-  const flux = await downloadContentFromMessage(
-    mediaMessage,
-    type
-  );
+    return true;
+  } catch (error) {
+    console.error('❌ Erreur envoi WhatsApp :', error.message);
+    return false;
+  }
+}
+
+async function envoyerReponse(jid, texte, messageOriginal = null) {
+  if (!sock || !whatsappConnected) {
+    return false;
+  }
+
+  try {
+    const options = {};
+
+    if (messageOriginal?.key) {
+      options.quoted = messageOriginal;
+    }
+
+    await sock.sendMessage(jid, {
+      text: texte,
+      ...options
+    });
+
+    return true;
+  } catch (error) {
+    console.error('❌ Erreur réponse :', error.message);
+    return false;
+  }
+}
+
+// ======================================================
+// TÉLÉCHARGEMENT DES MÉDIAS
+// ======================================================
+
+async function telechargerMedia(message, type) {
+  const contenu = obtenirMessageReel(message);
+
+  let media;
+
+  if (type === 'audio') {
+    media = contenu.audioMessage || contenu.pttMessage;
+  } else if (type === 'image') {
+    media = contenu.imageMessage;
+  } else if (type === 'video') {
+    media = contenu.videoMessage;
+  }
+
+  if (!media) {
+    throw new Error(`Média ${type} introuvable.`);
+  }
+
+  const stream = await downloadContentFromMessage(media, type);
 
   const morceaux = [];
   let taille = 0;
 
-  for await (const morceau of flux) {
+  const limite =
+    type === 'audio'
+      ? MAX_AUDIO_SIZE
+      : MAX_IMAGE_SIZE;
+
+  for await (const morceau of stream) {
     taille += morceau.length;
 
     if (taille > limite) {
-      throw new Error(
-        `Le média dépasse la limite autorisée de ${Math.round(limite / 1024 / 1024)} Mo.`
-      );
+      throw new Error('Le fichier est trop volumineux.');
     }
 
     morceaux.push(morceau);
@@ -408,63 +578,86 @@ async function telechargerMedia(mediaMessage, type = 'image') {
 }
 
 // ======================================================
-// TRANSCRIPTION AUDIO WHISPER
+// TRANSCRIPTION AUDIO AVEC WHISPER
 // ======================================================
 
-async function transcrireAudio(
-  buffer,
-  filename = 'audio.ogg',
-  mimetype = 'audio/ogg'
-) {
+async function transcrireAudio(buffer) {
   if (!groq) {
     throw new Error('Groq n’est pas configuré.');
   }
 
   const fichier = await toFile(
     buffer,
-    filename,
-    { type: mimetype }
+    'message.ogg',
+    {
+      type: 'audio/ogg'
+    }
   );
 
   const resultat = await groq.audio.transcriptions.create({
     file: fichier,
     model: WHISPER_MODEL,
-    language: WHISPER_LANGUAGE,
+    language: 'fr',
     response_format: 'text'
   });
 
-  if (typeof resultat === 'string') {
-    return resultat.trim();
+  const texte = typeof resultat === 'string'
+    ? resultat
+    : resultat.text || '';
+
+  if (!texte.trim()) {
+    throw new Error('Aucune parole détectée dans le message audio.');
   }
 
-  return String(resultat?.text || '').trim();
+  return texte.trim();
 }
 
 // ======================================================
-// GÉNÉRATION VOCALE ELEVENLABS
+// ELEVENLABS : SYNTHÈSE VOCALE
 // ======================================================
+
+function nettoyerTextePourVoix(texte) {
+  return String(texte)
+    .replace(/```[\s\S]*?```/g, ' ')
+    .replace(/`([^`]+)`/g, '$1')
+    .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
+    .replace(/https?:\/\/\S+/g, '')
+    .replace(/[*_~#>|]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 1800);
+}
 
 async function genererAudioElevenLabs(texte) {
   if (!ELEVENLABS_API_KEY || !ELEVENLABS_VOICE_ID) {
     throw new Error(
-      'ELEVENLABS_API_KEY ou ELEVENLABS_VOICE_ID manquant.'
+      'ELEVENLABS_API_KEY ou ELEVENLABS_VOICE_ID manquante.'
     );
   }
 
+  const texteVoix = nettoyerTextePourVoix(texte);
+
+  if (!texteVoix) {
+    throw new Error('Aucun texte à convertir en audio.');
+  }
+
+  const url =
+    `https://api.elevenlabs.io/v1/text-to-speech/${encodeURIComponent(ELEVENLABS_VOICE_ID)}`;
+
   const reponse = await fetch(
-    `https://api.elevenlabs.io/v1/text-to-speech/${encodeURIComponent(ELEVENLABS_VOICE_ID)}?output_format=mp3_22050_32`,
+    `${url}?output_format=mp3_22050_32`,
     {
       method: 'POST',
       headers: {
         'xi-api-key': ELEVENLABS_API_KEY,
         'Content-Type': 'application/json',
-        'Accept': 'audio/mpeg'
+        Accept: 'audio/mpeg'
       },
       body: JSON.stringify({
-        text: nettoyerTexteVocal(texte),
+        text: texteVoix,
         model_id: ELEVENLABS_MODEL,
         voice_settings: {
-          stability: 0.5,
+          stability: 0.45,
           similarity_boost: 0.75
         }
       })
@@ -472,10 +665,10 @@ async function genererAudioElevenLabs(texte) {
   );
 
   if (!reponse.ok) {
-    const erreur = await reponse.text();
+    const details = await reponse.text();
 
     throw new Error(
-      `ElevenLabs ${reponse.status}: ${erreur.slice(0, 300)}`
+      `ElevenLabs HTTP ${reponse.status}: ${details.slice(0, 300)}`
     );
   }
 
@@ -483,7 +676,7 @@ async function genererAudioElevenLabs(texte) {
 }
 
 // ======================================================
-// CONVERSION MP3 EN OGG OPUS
+// CONVERSION MP3 VERS OGG/OPUS POUR WHATSAPP
 // ======================================================
 
 async function convertirMp3EnOgg(mp3Buffer) {
@@ -491,33 +684,33 @@ async function convertirMp3EnOgg(mp3Buffer) {
     throw new Error('FFmpeg n’est pas disponible.');
   }
 
-  const dossierTemp = await fs.mkdtemp(
-    path.join(os.tmpdir(), 'hbot1-')
+  const dossier = await fs.mkdtemp(
+    path.join(os.tmpdir(), 'hbot-audio-')
   );
 
-  const fichierMp3 = path.join(dossierTemp, 'audio.mp3');
-  const fichierOgg = path.join(dossierTemp, 'audio.ogg');
+  const mp3Path = path.join(dossier, 'input.mp3');
+  const oggPath = path.join(dossier, 'output.ogg');
 
   try {
-    await fs.writeFile(fichierMp3, mp3Buffer);
+    await fs.writeFile(mp3Path, mp3Buffer);
 
     await new Promise((resolve, reject) => {
       const processus = spawn(ffmpegPath, [
         '-y',
-        '-i', fichierMp3,
+        '-i', mp3Path,
         '-vn',
         '-ac', '1',
         '-ar', '48000',
         '-c:a', 'libopus',
         '-b:a', '32k',
-        '-application', 'voip',
-        fichierOgg
+        '-f', 'ogg',
+        oggPath
       ]);
 
-      let erreur = '';
+      let stderr = '';
 
-      processus.stderr.on('data', donnees => {
-        erreur += donnees.toString();
+      processus.stderr.on('data', data => {
+        stderr += data.toString();
       });
 
       processus.on('error', reject);
@@ -527,17 +720,15 @@ async function convertirMp3EnOgg(mp3Buffer) {
           resolve();
         } else {
           reject(
-            new Error(
-              `Erreur FFmpeg (${code}): ${erreur.slice(-500)}`
-            )
+            new Error(`Conversion audio échouée : ${stderr.slice(-500)}`)
           );
         }
       });
     });
 
-    return await fs.readFile(fichierOgg);
+    return await fs.readFile(oggPath);
   } finally {
-    await fs.rm(dossierTemp, {
+    await fs.rm(dossier, {
       recursive: true,
       force: true
     });
@@ -545,175 +736,57 @@ async function convertirMp3EnOgg(mp3Buffer) {
 }
 
 // ======================================================
-// ENVOI VOCAL
+// RÉPONSE VOCALE
 // ======================================================
 
-async function envoyerVocal(sock, jid, texte) {
-  if (!VOICE_REPLY_ENABLED) return false;
-
-  if (!ELEVENLABS_API_KEY || !ELEVENLABS_VOICE_ID) {
-    return false;
+async function envoyerReponseVocale(jid, texte, messageOriginal = null) {
+  if (!VOICE_REPLY_ENABLED) {
+    return envoyerReponse(jid, texte, messageOriginal);
   }
 
   try {
-    const texteNettoye = nettoyerTexteVocal(texte);
-
-    if (!texteNettoye) return false;
-
-    const mp3 = await genererAudioElevenLabs(texteNettoye);
+    const mp3 = await genererAudioElevenLabs(texte);
     const ogg = await convertirMp3EnOgg(mp3);
 
-    await sock.sendMessage(jid, {
+    if (!sock || !whatsappConnected) {
+      return false;
+    }
+
+    const options = {
       audio: ogg,
       mimetype: 'audio/ogg; codecs=opus',
       ptt: true
-    });
+    };
+
+    if (messageOriginal?.key) {
+      options.quoted = messageOriginal;
+    }
+
+    await sock.sendMessage(jid, options);
 
     return true;
   } catch (error) {
-    logger.error(
-      { error: error.message },
-      'Échec de l’envoi vocal.'
-    );
+    console.error('❌ Réponse vocale impossible :', error.message);
 
-    return false;
+    // Si la synthèse vocale échoue, le bot répond quand même par écrit.
+    return envoyerReponse(jid, texte, messageOriginal);
   }
 }
 
 // ======================================================
-// EXTRACTION DES IMAGES D'UNE VIDÉO
-// ======================================================
-
-async function extraireImagesVideo(buffer) {
-  if (!ffmpegPath) {
-    throw new Error('FFmpeg n’est pas disponible.');
-  }
-
-  const dossierTemp = await fs.mkdtemp(
-    path.join(os.tmpdir(), 'hbot1-video-')
-  );
-
-  const fichierVideo = path.join(dossierTemp, 'video.mp4');
-
-  try {
-    await fs.writeFile(fichierVideo, buffer);
-
-    const duree = await new Promise((resolve, reject) => {
-      const processus = spawn(ffmpegPath, [
-        '-i', fichierVideo,
-        '-hide_banner'
-      ]);
-
-      let sortie = '';
-
-      processus.stderr.on('data', data => {
-        sortie += data.toString();
-      });
-
-      processus.on('error', reject);
-
-      processus.on('close', () => {
-        const match = sortie.match(
-          /Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)/
-        );
-
-        if (!match) {
-          reject(new Error('Durée de la vidéo inconnue.'));
-          return;
-        }
-
-        resolve(
-          Number(match[1]) * 3600 +
-          Number(match[2]) * 60 +
-          Number(match[3])
-        );
-      });
-    });
-
-    const positions = duree < 3
-      ? [Math.max(0, duree / 2)]
-      : [
-          duree * 0.15,
-          duree * 0.50,
-          duree * 0.85
-        ];
-
-    const images = [];
-
-    for (let i = 0; i < positions.length; i++) {
-      const fichierImage = path.join(
-        dossierTemp,
-        `image-${i}.jpg`
-      );
-
-      await new Promise((resolve, reject) => {
-        const processus = spawn(ffmpegPath, [
-          '-y',
-          '-ss', String(positions[i]),
-          '-i', fichierVideo,
-          '-frames:v', '1',
-          '-vf', 'scale=768:-1',
-          '-q:v', '5',
-          fichierImage
-        ]);
-
-        let erreur = '';
-
-        processus.stderr.on('data', data => {
-          erreur += data.toString();
-        });
-
-        processus.on('error', reject);
-
-        processus.on('close', code => {
-          if (code === 0) {
-            resolve();
-          } else {
-            reject(
-              new Error(
-                `Extraction image impossible: ${erreur.slice(-300)}`
-              )
-            );
-          }
-        });
-      });
-
-      images.push(await fs.readFile(fichierImage));
-    }
-
-    return images;
-  } finally {
-    await fs.rm(dossierTemp, {
-      recursive: true,
-      force: true
-    });
-  }
-}
-
-// ======================================================
-// ANALYSE D'UNE IMAGE
+// ANALYSE D'IMAGE AVEC GROQ VISION
 // ======================================================
 
 async function analyserImage(buffer, question = '') {
   if (!groq) {
-    return 'L’analyse des images n’est pas disponible actuellement.';
+    return 'Le service d’analyse d’image n’est pas configuré.';
   }
 
-  const imageBase64 = buffer.toString('base64');
+  const base64 = buffer.toString('base64');
 
-  const message = [
-    {
-      type: 'text',
-      text: question ||
-        'Décris cette image avec précision, en français simple.'
-    },
-    {
-      type: 'image_url',
-      image_url: {
-        url: `data:image/jpeg;base64,${imageBase64}`
-      }
-    }
-  ];
+  const prompt = question.trim()
+    ? `Analyse cette image et réponds à la question suivante : ${question}`
+    : 'Décris cette image avec précision en français.';
 
   try {
     const resultat = await groq.chat.completions.create({
@@ -725,1205 +798,109 @@ async function analyserImage(buffer, question = '') {
         },
         {
           role: 'user',
-          content: message
+          content: [
+            {
+              type: 'text',
+              text: prompt
+            },
+            {
+              type: 'image_url',
+              image_url: {
+                url: `data:image/jpeg;base64,${base64}`
+              }
+            }
+          ]
         }
       ],
       max_completion_tokens: 1000
     });
 
-    return resultat.choices?.[0]?.message?.content ||
-      'Je n’ai pas réussi à analyser cette image.';
-  } catch (error) {
-    logger.error(
-      { error: error.message },
-      'Erreur analyse image.'
+    return nettoyerTexte(
+      resultat.choices?.[0]?.message?.content ||
+      'Je n’ai pas réussi à analyser cette image.'
     );
+  } catch (error) {
+    console.error('❌ Erreur analyse image :', error.message);
 
-    return 'Je n’arrive pas à analyser cette image pour le moment. Vérifie que le modèle de vision configuré est disponible sur Groq.';
+    return 'Je n’arrive pas à analyser cette image pour le moment. Vérifie que le modèle de vision configuré est disponible avec ta clé Groq.';
   }
 }
 
 // ======================================================
-// ANALYSE D'UNE VIDÉO
+// MÉMOIRE DE GROUPE FIRESTORE
 // ======================================================
 
-async function analyserVideo(buffer, question = '') {
-  if (!groq) {
-    return 'L’analyse vidéo n’est pas disponible actuellement.';
+function encoderJid(jid) {
+  return Buffer.from(jid).toString('base64url');
+}
+
+async function ajouterMemoireGroupe(jid, texte) {
+  if (!db || !jid || !texte) {
+    return;
+  }
+
+  const motsCles =
+    /cotisation|cotisations|fcfa|prix|date|heure|lieu|sortie|voyage|réunion|reunion|décision|decision|programme/i;
+
+  if (!motsCles.test(texte)) {
+    return;
   }
 
   try {
-    const images = await extraireImagesVideo(buffer);
+    const reference = db
+      .collection('hbot2_group_memory')
+      .doc(encoderJid(jid));
 
-    if (!images.length) {
-      return 'Je n’ai pas pu extraire les images de cette vidéo.';
-    }
+    await db.runTransaction(async transaction => {
+      const snapshot = await transaction.get(reference);
 
-    const imagesBase64 = images.map(image => ({
-      type: 'image_url',
-      image_url: {
-        url: `data:image/jpeg;base64,${image.toString('base64')}`
-      }
-    }));
+      const anciennesMemoires = snapshot.exists
+        ? snapshot.data().items || []
+        : [];
 
-    const contenu = [
-      {
-        type: 'text',
-        text: question ||
-          'Décris cette vidéo à partir des images fournies. Précise que ton analyse porte sur quelques images extraites.'
-      },
-      ...imagesBase64
-    ];
+      const nouvelleMemoire = {
+        text: texte.slice(0, 1000),
+        date: new Date().toISOString()
+      };
 
-    const resultat = await groq.chat.completions.create({
-      model: GROQ_VISION_MODEL,
-      messages: [
-        {
-          role: 'system',
-          content: SYSTEM_PROMPT
-        },
-        {
-          role: 'user',
-          content: contenu
-        }
-      ],
-      max_completion_tokens: 1200
+      const items = [
+        ...anciennesMemoires,
+        nouvelleMemoire
+      ].slice(-MAX_GROUP_MEMORY);
+
+      transaction.set(reference, {
+        jid,
+        items,
+        updatedAt: admin.firestore.FieldValue.serverTimestamp()
+      });
     });
-
-    return resultat.choices?.[0]?.message?.content ||
-      'Je n’ai pas réussi à analyser cette vidéo.';
   } catch (error) {
-    logger.error(
-      { error: error.message },
-      'Erreur analyse vidéo.'
-    );
-
-    return 'Je n’ai pas réussi à analyser cette vidéo. Vérifie le format et la disponibilité du modèle de vision.';
+    console.error('⚠️ Mémoire groupe :', error.message);
   }
 }
 
-// ======================================================
-// EXTRACTION DES MESSAGES WHATSAPP
-// ======================================================
-
-function obtenirMessageReel(message) {
-  let contenu = message?.message;
-
-  if (!contenu) return null;
-
-  for (let i = 0; i < 5; i++) {
-    if (contenu.ephemeralMessage?.message) {
-      contenu = contenu.ephemeralMessage.message;
-    } else if (contenu.viewOnceMessage?.message) {
-      contenu = contenu.viewOnceMessage.message;
-    } else if (contenu.viewOnceMessageV2?.message) {
-      contenu = contenu.viewOnceMessageV2.message;
-    } else if (contenu.viewOnceMessageV2Extension?.message) {
-      contenu = contenu.viewOnceMessageV2Extension.message;
-    } else {
-      break;
-    }
-  }
-
-  return contenu;
-}
-
-function extraireTexteMessage(message) {
-  const contenu = obtenirMessageReel(message);
-
-  if (!contenu) return '';
-
-  return (
-    contenu.conversation ||
-    contenu.extendedTextMessage?.text ||
-    contenu.imageMessage?.caption ||
-    contenu.videoMessage?.caption ||
-    contenu.documentMessage?.caption ||
-    contenu.buttonsResponseMessage?.selectedButtonId ||
-    contenu.listResponseMessage?.singleSelectReply?.selectedRowId ||
-    ''
-  ).trim();
-}
-
-function extraireContexte(message) {
-  const contenu = obtenirMessageReel(message);
-
-  return (
-    contenu?.extendedTextMessage?.contextInfo ||
-    contenu?.imageMessage?.contextInfo ||
-    contenu?.videoMessage?.contextInfo ||
-    contenu?.audioMessage?.contextInfo ||
-    contenu?.documentMessage?.contextInfo ||
-    {}
-  );
-}
-
-function extraireMedia(message) {
-  const contenu = obtenirMessageReel(message);
-
-  if (!contenu) return null;
-
-  if (contenu.imageMessage) {
-    return {
-      type: 'image',
-      message: contenu.imageMessage
-    };
-  }
-
-  if (contenu.videoMessage) {
-    return {
-      type: 'video',
-      message: contenu.videoMessage
-    };
-  }
-
-  if (contenu.audioMessage) {
-    return {
-      type: 'audio',
-      message: contenu.audioMessage
-    };
-  }
-
-  return null;
-}
-
-function reponseAuBot(message) {
-  const contexte = extraireContexte(message);
-  const botJid = obtenirJidBot();
-
-  if (!contexte?.participant || !botJid) return false;
-
-  return (
-    extraireNumeroJid(contexte.participant) ===
-    extraireNumeroJid(botJid)
-  );
-}
-
-function creerCleConversation(jid, expediteur) {
-  if (estJidGroupe(jid)) {
-    return `${jid}:${expediteur}`;
-  }
-
-  return jid;
-}
-
-// ======================================================
-// PROGRAMME DE L'ÉGLISE
-// ======================================================
-
-function texteProgrammeMois() {
-  return [
-    '📅 *PROGRAMME DE L’ÉGLISE*',
-    '',
-    'Église des Assemblées de Dieu',
-    'Temple de la Restauration Divine',
-    '',
-    'Pour obtenir les dates exactes des activités du mois, consulte les annonces officielles de l’église.',
-    '',
-    '⚠️ Je ne veux pas inventer de dates ou d’horaires non confirmés.'
-  ].join('\n');
-}
-
-function obtenirDateAbidjan(date = new Date()) {
-  const parties = new Intl.DateTimeFormat('en-CA', {
-    timeZone: 'Africa/Abidjan',
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit'
-  }).formatToParts(date);
-
-  const valeur = type =>
-    parties.find(partie => partie.type === type)?.value;
-
-  return {
-    annee: Number(valeur('year')),
-    mois: Number(valeur('month')),
-    jour: Number(valeur('day'))
-  };
-}
-
-function getProgrammeDuDimanche() {
-  const dateAbidjan = obtenirDateAbidjan();
-
-  const dateLocale = new Date(Date.UTC(
-    dateAbidjan.annee,
-    dateAbidjan.mois - 1,
-    dateAbidjan.jour
-  ));
-
-  const jourSemaine = dateLocale.getUTCDay();
-  const joursJusquaDimanche = (7 - jourSemaine) % 7;
-
-  dateLocale.setUTCDate(
-    dateLocale.getUTCDate() + joursJusquaDimanche
-  );
-
-  const dateFormatee = new Intl.DateTimeFormat('fr-FR', {
-    timeZone: 'UTC',
-    weekday: 'long',
-    day: 'numeric',
-    month: 'long',
-    year: 'numeric'
-  }).format(dateLocale);
-
-  return [
-    '📅 *PROGRAMME DU DIMANCHE*',
-    '',
-    `Date : ${dateFormatee}`,
-    '',
-    'Pour les heures de culte et les activités précises, consulte les annonces officielles de l’église.',
-    '',
-    'Que Dieu vous bénisse ! 🙏'
-  ].join('\n');
-}
-
-// ======================================================
-// COTISATIONS : OUTILS DE LECTURE DES DATES
-// ======================================================
-
-// Ces fonctions lisent les dates existantes sans modifier Firebase.
-
-function convertirDateCotisation(valeur) {
-  if (valeur === null || valeur === undefined || valeur === '') {
-    return null;
+async function lireMemoireGroupe(jid) {
+  if (!db || !jid) {
+    return [];
   }
 
   try {
-    // Timestamp Firestore
-    if (typeof valeur.toDate === 'function') {
-      const date = valeur.toDate();
-
-      return Number.isNaN(date.getTime()) ? null : date;
-    }
-
-    // Objet Timestamp sérialisé
-    if (
-      typeof valeur === 'object' &&
-      Number.isFinite(valeur.seconds)
-    ) {
-      const date = new Date(valeur.seconds * 1000);
-
-      return Number.isNaN(date.getTime()) ? null : date;
-    }
-
-    // Date JavaScript
-    if (valeur instanceof Date) {
-      return Number.isNaN(valeur.getTime()) ? null : valeur;
-    }
-
-    // Horodatage numérique
-    if (typeof valeur === 'number') {
-      const date = new Date(
-        valeur < 1000000000000 ? valeur * 1000 : valeur
-      );
-
-      return Number.isNaN(date.getTime()) ? null : date;
-    }
-
-    // Texte date
-    if (typeof valeur === 'string') {
-      const date = new Date(valeur);
-
-      return Number.isNaN(date.getTime()) ? null : date;
-    }
-  } catch (error) {
-    logger.warn(
-      { error: error.message },
-      'Date de cotisation illisible.'
-    );
-  }
-
-  return null;
-}
-
-function obtenirDateTransaction(data) {
-  const champsDate = [
-    'timestamp',
-    'date',
-    'createdAt',
-    'created_at',
-    'createdOn',
-    'dateCreation',
-    'date_cotisation'
-  ];
-
-  for (const champ of champsDate) {
-    const date = convertirDateCotisation(data[champ]);
-
-    if (date) return date;
-  }
-
-  return null;
-}
-
-function formaterDateCotisation(date) {
-  if (!date) return 'Date inconnue';
-
-  const parties = new Intl.DateTimeFormat('en-GB', {
-    timeZone: 'Africa/Abidjan',
-    day: '2-digit',
-    month: '2-digit',
-    year: 'numeric',
-    hour: '2-digit',
-    minute: '2-digit',
-    second: '2-digit',
-    hourCycle: 'h23'
-  }).formatToParts(date);
-
-  const valeur = type =>
-    parties.find(partie => partie.type === type)?.value || '00';
-
-  return (
-    `${valeur('day')}/${valeur('month')}/${valeur('year')} ` +
-    `${valeur('hour')}:${valeur('minute')}:${valeur('second')}`
-  );
-}
-
-// ======================================================
-// RAPPORT DES COTISATIONS FIREBASE
-// ======================================================
-
-async function getCotisationsReport() {
-  if (!db) {
-    return '⚠️ Firebase n’est pas configuré. Impossible de consulter les cotisations.';
-  }
-
-  try {
-    // On conserve la collection Firebase existante.
-    const resultat = await db
-      .collection('transactions')
-      .limit(100)
+    const snapshot = await db
+      .collection('hbot2_group_memory')
+      .doc(encoderJid(jid))
       .get();
 
-    if (resultat.empty) {
-      return 'Aucune transaction de cotisation trouvée.';
+    if (!snapshot.exists) {
+      return [];
     }
 
-    const transactions = resultat.docs.map(doc => {
-      const data = doc.data();
-
-      const nom =
-        data.name ||
-        data.memberName ||
-        data.nom ||
-        data.member ||
-        data.membre ||
-        'Membre inconnu';
-
-      const montantBrut =
-        data.amount ??
-        data.montant ??
-        data.amountFCFA ??
-        data.montantFCFA ??
-        0;
-
-      const montant = Number(montantBrut);
-
-      const date = obtenirDateTransaction(data);
-
-      return {
-        id: doc.id,
-        nom: String(nom),
-        montant: Number.isFinite(montant) ? montant : 0,
-        date
-      };
-    });
-
-    // Joanna reste toujours en première position.
-    // Les autres cotisations sont classées chronologiquement.
-    transactions.sort((a, b) => {
-      const aJoanna = normaliserTexte(a.nom).includes('joanna');
-      const bJoanna = normaliserTexte(b.nom).includes('joanna');
-
-      if (aJoanna && !bJoanna) return -1;
-      if (!aJoanna && bJoanna) return 1;
-
-      if (a.date && b.date) {
-        return a.date.getTime() - b.date.getTime();
-      }
-
-      if (a.date && !b.date) return -1;
-      if (!a.date && b.date) return 1;
-
-      return 0;
-    });
-
-    const lignes = transactions.map((transaction, index) => {
-      const nomNormalise = normaliserTexte(transaction.nom);
-
-      const estJoanna =
-        nomNormalise.includes('joanna');
-
-      const symbole = estJoanna ? '🥇' : '✅';
-
-      const dateFormatee =
-        formaterDateCotisation(transaction.date);
-
-      return (
-        `${symbole} *${transaction.nom}* : ` +
-        `+${transaction.montant.toLocaleString('fr-FR')} FCFA ` +
-        `_${'('}${dateFormatee}${')'}_`
-      );
-    });
-
-    return [
-      '📊 *CLASSEMENT DES COTISATIONS* 🪙',
-      '',
-      ...lignes,
-      '',
-      '💡 Merci pour votre fidélité ! 🙏✨'
-    ].join('\n');
+    return snapshot.data().items || [];
   } catch (error) {
-    logger.error(
-      { error: error.message, stack: error.stack },
-      'Erreur rapport cotisations.'
-    );
-
-    return 'Impossible de récupérer le classement des cotisations pour le moment.';
+    console.error('⚠️ Lecture mémoire groupe :', error.message);
+    return [];
   }
 }
 
 // ======================================================
-// COMMANDES WHATSAPP
+// FIN DE LA PARTIE 1
 // ======================================================
-
-async function traiterCommande(
-  texte,
-  jid,
-  sock,
-  message,
-  chatId
-) {
-  const commande = normaliserTexte(texte).split(/\s+/)[0];
-
-  switch (commande) {
-    case '!aide':
-    case '!help':
-      return [
-        '🤖 *COMMANDES DE HBOT1*',
-        '',
-        '!aide — Affiche les commandes',
-        '!id — Affiche l’identifiant du groupe ou du chat',
-        '!resetia — Réinitialise ton historique de conversation',
-        '!programme — Affiche les informations du programme',
-        '!cotisation — Affiche le classement des cotisations',
-        '!cotisations — Affiche le classement des cotisations',
-        '!c — Affiche le classement des cotisations',
-        '',
-        'Tu peux aussi me poser directement tes questions.'
-      ].join('\n');
-
-    case '!id':
-      return `🆔 Identifiant de ce chat :\n${jid}`;
-
-    case '!resetia':
-      resetHistory(chatId);
-      return '✅ Ton historique de conversation a été réinitialisé.';
-
-    case '!programme':
-      return texteProgrammeMois() +
-        '\n\n' +
-        getProgrammeDuDimanche();
-
-    case '!cotisation':
-    case '!cotisations':
-    case '!c':
-      return await getCotisationsReport();
-
-    case '!setprogramme':
-      return '⚠️ Cette commande ne modifie pas encore le programme. Les changements doivent être ajoutés explicitement au code ou à une source de données administrable.';
-
-    default:
-      return null;
-  }
-}
-
-// ======================================================
-// TRAITEMENT DES MESSAGES WHATSAPP
-// ======================================================
-
-async function traiterMessages(sock, message) {
-  const jid = message.key?.remoteJid;
-
-  if (!jid || jid === 'status@broadcast') return;
-  if (message.key?.fromMe) return;
-
-  const expediteur =
-    message.key?.participant || jid;
-
-  const cleMessage = message.key?.id
-    ? `${jid}:${message.key.id}`
-    : null;
-
-  if (cleMessage && processingMessages.has(cleMessage)) {
-    return;
-  }
-
-  if (cleMessage) {
-    processingMessages.add(cleMessage);
-  }
-
-  try {
-    const texteOriginal = extraireTexteMessage(message);
-    const texteNormalise = normaliserTexte(texteOriginal);
-    const groupe = estJidGroupe(jid);
-
-    const mentionBot = estMentionBot(message, texteOriginal);
-    const reponseBot = reponseAuBot(message);
-    const commande = estCommandeDirecte(texteOriginal);
-
-    // Dans les groupes, éviter de répondre à toutes les conversations.
-    if (groupe && !mentionBot && !reponseBot && !commande) {
-      return;
-    }
-
-    const chatId = creerCleConversation(jid, expediteur);
-
-    if (commande) {
-      const reponseCommande = await traiterCommande(
-        texteOriginal,
-        jid,
-        sock,
-        message,
-        chatId
-      );
-
-      if (reponseCommande) {
-        await sock.sendMessage(
-          jid,
-          { text: reponseCommande },
-          { quoted: message }
-        );
-
-        return;
-      }
-    }
-
-    // Identification
-    if (
-      texteNormalise === 'qui es tu' ||
-      texteNormalise === 'qui est hbot1' ||
-      texteNormalise === 'qui es hbot1' ||
-      texteNormalise === 'qui t a cree' ||
-      texteNormalise === 'qui est ton createur'
-    ) {
-      await sock.sendMessage(
-        jid,
-        {
-          text: `Je suis ${BOT_NAME}, créé et développé par ${CREATOR_NAME}. 😊`
-        },
-        { quoted: message }
-      );
-
-      return;
-    }
-
-    const media = extraireMedia(message);
-
-    // --------------------------------------------------
-    // MESSAGE VOCAL
-    // --------------------------------------------------
-
-    if (media?.type === 'audio') {
-      try {
-        const buffer = await telechargerMedia(
-          media.message,
-          'audio'
-        );
-
-        const mimetype =
-          media.message.mimetype || 'audio/ogg';
-
-        const filename = mimetype.includes('mpeg')
-          ? 'audio.mp3'
-          : mimetype.includes('mp4')
-            ? 'audio.m4a'
-            : 'audio.ogg';
-
-        const transcription = await transcrireAudio(
-          buffer,
-          filename,
-          mimetype
-        );
-
-        if (!transcription) {
-          await sock.sendMessage(
-            jid,
-            {
-              text: 'Je n’ai pas réussi à comprendre ce message vocal. Peux-tu le renvoyer ?'
-            },
-            { quoted: message }
-          );
-
-          return;
-        }
-
-        const reponse = await genererIA(
-          chatId,
-          transcription
-        );
-
-        const vocalEnvoye = await envoyerVocal(
-          sock,
-          jid,
-          reponse
-        );
-
-        if (!vocalEnvoye) {
-          await sock.sendMessage(
-            jid,
-            { text: reponse },
-            { quoted: message }
-          );
-        }
-
-        return;
-      } catch (error) {
-        logger.error(
-          { error: error.message },
-          'Erreur traitement audio.'
-        );
-
-        await sock.sendMessage(
-          jid,
-          {
-            text: 'Je n’arrive pas à traiter ce message vocal pour le moment. Réessaie avec un audio plus court.'
-          },
-          { quoted: message }
-        );
-
-        return;
-      }
-    }
-
-    // --------------------------------------------------
-    // IMAGE
-    // --------------------------------------------------
-
-    if (media?.type === 'image') {
-      try {
-        const buffer = await telechargerMedia(
-          media.message,
-          'image'
-        );
-
-        const question = texteOriginal ||
-          'Décris cette image.';
-
-        const reponse = await analyserImage(
-          buffer,
-          question
-        );
-
-        await sock.sendMessage(
-          jid,
-          { text: reponse },
-          { quoted: message }
-        );
-
-        return;
-      } catch (error) {
-        logger.error(
-          { error: error.message },
-          'Erreur traitement image.'
-        );
-
-        await sock.sendMessage(
-          jid,
-          {
-            text: 'Je n’arrive pas à lire cette image. Vérifie son format ou envoie une image plus légère.'
-          },
-          { quoted: message }
-        );
-
-        return;
-      }
-    }
-
-    // --------------------------------------------------
-    // VIDÉO
-    // --------------------------------------------------
-
-    if (media?.type === 'video') {
-      try {
-        const buffer = await telechargerMedia(
-          media.message,
-          'video'
-        );
-
-        const question = texteOriginal ||
-          'Décris cette vidéo.';
-
-        const reponse = await analyserVideo(
-          buffer,
-          question
-        );
-
-        await sock.sendMessage(
-          jid,
-          { text: reponse },
-          { quoted: message }
-        );
-
-        return;
-      } catch (error) {
-        logger.error(
-          { error: error.message },
-          'Erreur traitement vidéo.'
-        );
-
-        await sock.sendMessage(
-          jid,
-          {
-            text: 'Je n’arrive pas à analyser cette vidéo. Essaie avec une vidéo plus courte et plus légère.'
-          },
-          { quoted: message }
-        );
-
-        return;
-      }
-    }
-
-    // --------------------------------------------------
-    // TEXTE NORMAL
-    // --------------------------------------------------
-
-    let textePourIA = texteOriginal;
-
-    if (groupe) {
-      textePourIA = nettoyerMention(textePourIA);
-
-      const nomsPossibles = [
-        BOT_NAME,
-        'Hbot',
-        'Hbot1'
-      ];
-
-      for (const nom of nomsPossibles) {
-        textePourIA = textePourIA.replace(
-          new RegExp(
-            nom.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'),
-            'ig'
-          ),
-          ''
-        );
-      }
-
-      textePourIA = textePourIA.trim();
-    }
-
-    if (!textePourIA) {
-      textePourIA = 'Bonjour !';
-    }
-
-    const reponse = await genererIA(
-      chatId,
-      textePourIA
-    );
-
-    await sock.sendMessage(
-      jid,
-      { text: reponse },
-      { quoted: message }
-    );
-  } catch (error) {
-    logger.error(
-      { error: error.message, stack: error.stack },
-      'Erreur générale traitement message.'
-    );
-  } finally {
-    if (cleMessage) {
-      processingMessages.delete(cleMessage);
-    }
-  }
-}
-
-// ======================================================
-// EXPRESS : PAGE D'ÉTAT ET HEALTH CHECK
-// ======================================================
-
-const app = express();
-
-app.get('/', async (req, res) => {
-  let qrHtml = '<p>QR code indisponible pour le moment.</p>';
-
-  if (currentQrImage && !isConnected) {
-    qrHtml = `
-      <img
-        src="${currentQrImage}"
-        alt="QR WhatsApp"
-        style="max-width:300px;width:100%"
-      >
-    `;
-  }
-
-  res.status(200).send(`
-    <!doctype html>
-    <html lang="fr">
-    <head>
-      <meta charset="utf-8">
-      <meta name="viewport" content="width=device-width, initial-scale=1">
-      <meta http-equiv="refresh" content="15">
-      <title>${BOT_NAME}</title>
-      <style>
-        body {
-          font-family: Arial, sans-serif;
-          background: #111;
-          color: #fff;
-          text-align: center;
-          padding: 30px;
-        }
-        .card {
-          max-width: 500px;
-          margin: auto;
-          padding: 25px;
-          border-radius: 15px;
-          background: #222;
-        }
-        img { border-radius: 10px; }
-        .ok { color: #4ade80; }
-        .wait { color: #facc15; }
-      </style>
-    </head>
-    <body>
-      <div class="card">
-        <h1>${BOT_NAME}</h1>
-        <p>Créé par ${CREATOR_NAME}</p>
-        <h2 class="${isConnected ? 'ok' : 'wait'}">
-          ${isConnected ? 'WhatsApp connecté' : 'En attente de connexion'}
-        </h2>
-        ${qrHtml}
-        <p>Actualisation automatique toutes les 15 secondes.</p>
-      </div>
-    </body>
-    </html>
-  `);
-});
-
-app.get('/health', (req, res) => {
-  res.status(200).json({
-    bot: BOT_NAME,
-    status: 'ok',
-    whatsapp: isConnected,
-    groq: Boolean(groq),
-    whisper: Boolean(groq),
-    elevenlabs: Boolean(
-      ELEVENLABS_API_KEY && ELEVENLABS_VOICE_ID
-    ),
-    firebase: Boolean(db),
-    voiceReplyEnabled: VOICE_REPLY_ENABLED,
-    uptime: Math.floor(process.uptime()),
-    timestamp: new Date().toISOString()
-  });
-});
-
-const server = app.listen(PORT, '0.0.0.0', () => {
-  logger.info(`Serveur web actif sur le port ${PORT}.`);
-});
-
-// ======================================================
-// ENVOI DES MESSAGES AUTOMATIQUES
-// ======================================================
-
-async function envoyerMessageGroupe(texte) {
-  if (!sockInstance || !isConnected) {
-    logger.warn(
-      'Message automatique ignoré : WhatsApp non connecté.'
-    );
-
-    return;
-  }
-
-  if (!WHATSAPP_GROUP_ID) {
-    logger.warn('WHATSAPP_GROUP_ID non configuré.');
-    return;
-  }
-
-  try {
-    await sockInstance.sendMessage(
-      WHATSAPP_GROUP_ID,
-      { text: texte }
-    );
-
-    logger.info('Message automatique envoyé.');
-  } catch (error) {
-    logger.error(
-      { error: error.message },
-      'Erreur envoi message automatique.'
-    );
-  }
-}
-
-// ======================================================
-// RAPPELS AUTOMATIQUES
-// ======================================================
-
-cron.schedule('30 6 * * *', async () => {
-  await envoyerMessageGroupe(
-    '🙏 *MÉDITATION DU MATIN*\n\nPrenons quelques instants pour prier, méditer la Parole de Dieu et commencer cette journée avec foi. Que Dieu vous bénisse !'
-  );
-}, {
-  timezone: 'Africa/Abidjan'
-});
-
-// Veillée : premier et dernier vendredi du mois.
-cron.schedule('0 14 * * 5', async () => {
-  const date = obtenirDateAbidjan();
-
-  const dateUtc = new Date(Date.UTC(
-    date.annee,
-    date.mois - 1,
-    date.jour
-  ));
-
-  const jour = dateUtc.getUTCDate();
-
-  const dernierJour = new Date(
-    Date.UTC(date.annee, date.mois, 0)
-  ).getUTCDate();
-
-  const premierVendredi = jour <= 7;
-  const dernierVendredi = jour > dernierJour - 7;
-
-  if (premierVendredi || dernierVendredi) {
-    await envoyerMessageGroupe(
-      '🙏 *RAPPEL DE VEILLÉE*\n\nN’oublions pas notre rendez-vous de prière. Pour les horaires et les détails, veuillez consulter les annonces officielles de l’église.'
-    );
-  }
-}, {
-  timezone: 'Africa/Abidjan'
-});
-
-// Programme du week-end.
-cron.schedule('0 14 * * 5,6', async () => {
-  await envoyerMessageGroupe(
-    '⛪ *PROGRAMME DU WEEK-END*\n\nPréparons nos cœurs pour les activités spirituelles du week-end. Pour les horaires exacts, veuillez consulter les annonces officielles de l’église.'
-  );
-}, {
-  timezone: 'Africa/Abidjan'
-});
-
-// Rappel des cotisations le samedi.
-cron.schedule('0 16 * * 6', async () => {
-  await envoyerMessageGroupe(
-    '💰 *RAPPEL DES COTISATIONS*\n\nN’oublions pas notre participation aux cotisations prévues pour le studio et l’agapé. Merci à chacun pour son engagement.'
-  );
-}, {
-  timezone: 'Africa/Abidjan'
-});
-
-// Rappel du dimanche.
-cron.schedule('30 11 * * 0', async () => {
-  await envoyerMessageGroupe(
-    '🙏 *RAPPEL DU DIMANCHE*\n\nQue chacun se prépare pour le culte et les activités de l’église. Bon dimanche à tous !'
-  );
-}, {
-  timezone: 'Africa/Abidjan'
-});
-
-// Classement hebdomadaire des cotisations.
-cron.schedule('0 17 * * 0', async () => {
-  const rapport = await getCotisationsReport();
-
-  await envoyerMessageGroupe(rapport);
-}, {
-  timezone: 'Africa/Abidjan'
-});
-
-// Message du dimanche soir.
-cron.schedule('0 20 * * 0', async () => {
-  await envoyerMessageGroupe(
-    '🌙 Bonne soirée à tous ! Que Dieu vous accorde une nuit paisible. N’oublions pas de garder un moment pour la prière.'
-  );
-}, {
-  timezone: 'Africa/Abidjan'
-});
-
-// ======================================================
-// CONNEXION WHATSAPP
-// ======================================================
-
-async function connectToWhatsApp() {
-  if (connexionEnCours) {
-    logger.info('Connexion WhatsApp déjà en cours.');
-    return;
-  }
-
-  connexionEnCours = true;
-  const generation = ++connectionGeneration;
-
-  try {
-    const {
-      state,
-      saveCreds
-    } = await useMultiFileAuthState(AUTH_FOLDER);
-
-    let version;
-
-    try {
-      const resultat = await fetchLatestBaileysVersion();
-      version = resultat.version;
-    } catch (error) {
-      logger.warn(
-        { error: error.message },
-        'Impossible de récupérer la version Baileys. Utilisation de la version par défaut.'
-      );
-    }
-
-    const sock = makeWASocket({
-      ...(version ? { version } : {}),
-      auth: state,
-      logger,
-      printQRInTerminal: false,
-      browser: ['Hbot1', 'Chrome', '1.0.0'],
-      markOnlineOnConnect: false,
-      syncFullHistory: false
-    });
-
-    sockInstance = sock;
-
-    sock.ev.on('creds.update', saveCreds);
-
-    sock.ev.on('connection.update', async update => {
-      if (generation !== connectionGeneration) return;
-
-      const {
-        connection,
-        lastDisconnect,
-        qr
-      } = update;
-
-      if (qr) {
-        try {
-          currentQrImage = await QRCode.toDataURL(qr);
-
-          logger.info(
-            'QR code disponible sur la page web du bot.'
-          );
-        } catch (error) {
-          logger.error(
-            { error: error.message },
-            'Erreur génération QR.'
-          );
-        }
-      }
-
-      if (connection === 'open') {
-        isConnected = true;
-        currentQrImage = null;
-
-        logger.info('WhatsApp connecté avec succès.');
-      }
-
-      if (connection === 'close') {
-        isConnected = false;
-        currentQrImage = null;
-
-        const code =
-          lastDisconnect?.error?.output?.statusCode;
-
-        const deconnecte =
-          code === DisconnectReason.loggedOut;
-
-        logger.warn(
-          { code, deconnecte },
-          'Connexion WhatsApp fermée.'
-        );
-
-        if (deconnecte) {
-          logger.error(
-            'Session déconnectée. Vérifie la session WhatsApp avant de la supprimer.'
-          );
-
-          return;
-        }
-
-        setTimeout(() => {
-          if (generation === connectionGeneration) {
-            connectToWhatsApp().catch(error => {
-              logger.error(
-                { error: error.message },
-                'Échec reconnexion WhatsApp.'
-              );
-            });
-          }
-        }, 5000);
-      }
-    });
-
-    sock.ev.on('messages.upsert', async evenement => {
-      if (generation !== connectionGeneration) return;
-      if (evenement.type !== 'notify') return;
-
-      for (const message of evenement.messages || []) {
-        await traiterMessages(sock, message);
-      }
-    });
-  } catch (error) {
-    logger.error(
-      { error: error.message },
-      'Erreur connexion WhatsApp.'
-    );
-
-    setTimeout(() => {
-      if (generation === connectionGeneration) {
-        connectToWhatsApp().catch(err => {
-          logger.error(
-            { error: err.message },
-            'Nouvelle tentative impossible.'
-          );
-        });
-      }
-    }, 5000);
-  } finally {
-    connexionEnCours = false;
-  }
-}
-
-// ======================================================
-// ARRÊT PROPRE
-// ======================================================
-
-async function arreter(signal) {
-  logger.info(`Signal ${signal} reçu. Arrêt du bot.`);
-
-  try {
-    server.close();
-  } catch {}
-
-  try {
-    sockInstance?.end(
-      new Error('Arrêt du processus.')
-    );
-  } catch {}
-
-  process.exit(0);
-}
-
-process.on('SIGINT', () => arreter('SIGINT'));
-process.on('SIGTERM', () => arreter('SIGTERM'));
-
-process.on('unhandledRejection', erreur => {
-  logger.error(
-    { error: String(erreur) },
-    'Promesse rejetée non gérée.'
-  );
-});
-
-process.on('uncaughtException', erreur => {
-  logger.error(
-    { error: erreur.message, stack: erreur.stack },
-    'Exception non interceptée.'
-  );
-});
-
-// ======================================================
-// DÉMARRAGE
-// ======================================================
-
-connectToWhatsApp().catch(error => {
-  logger.error(
-    { error: error.message },
-    'Démarrage WhatsApp impossible.'
-  );
-});
