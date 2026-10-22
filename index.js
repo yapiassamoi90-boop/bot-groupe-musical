@@ -48,15 +48,6 @@ const GROQ_VISION_MODEL =
 const WHISPER_MODEL =
   process.env.WHISPER_MODEL || 'whisper-large-v3-turbo';
 
-const ELEVENLABS_API_KEY =
-  process.env.ELEVENLABS_API_KEY || '';
-
-const ELEVENLABS_VOICE_ID =
-  process.env.ELEVENLABS_VOICE_ID || '';
-
-const ELEVENLABS_MODEL =
-  process.env.ELEVENLABS_MODEL || 'eleven_multilingual_v2';
-
 const VOICE_REPLY_ENABLED =
   String(process.env.VOICE_REPLY_ENABLED ?? 'true').toLowerCase()
   === 'true';
@@ -613,7 +604,7 @@ async function transcrireAudio(buffer) {
 }
 
 // ======================================================
-// ELEVENLABS : SYNTHÈSE VOCALE
+// SYNTHÈSE VOCALE GRATUITE (GOOGLE TTS)
 // ======================================================
 
 function nettoyerTextePourVoix(texte) {
@@ -629,47 +620,23 @@ function nettoyerTextePourVoix(texte) {
 }
 
 async function genererAudioElevenLabs(texte) {
-  if (!ELEVENLABS_API_KEY || !ELEVENLABS_VOICE_ID) {
-    throw new Error(
-      'ELEVENLABS_API_KEY ou ELEVENLABS_VOICE_ID manquante.'
-    );
-  }
-
   const texteVoix = nettoyerTextePourVoix(texte);
 
   if (!texteVoix) {
     throw new Error('Aucun texte à convertir en audio.');
   }
 
-  const url =
-    `https://api.elevenlabs.io/v1/text-to-speech/${encodeURIComponent(ELEVENLABS_VOICE_ID)}`;
+  const url = `https://translate.google.com/translate_tts?ie=UTF-8&q=${encodeURIComponent(texteVoix)}&tl=fr&client=tw-ob`;
 
-  const reponse = await fetch(
-    `${url}?output_format=mp3_22050_32`,
-    {
-      method: 'POST',
-      headers: {
-        'xi-api-key': ELEVENLABS_API_KEY,
-        'Content-Type': 'application/json',
-        Accept: 'audio/mpeg'
-      },
-      body: JSON.stringify({
-        text: texteVoix,
-        model_id: ELEVENLABS_MODEL,
-        voice_settings: {
-          stability: 0.45,
-          similarity_boost: 0.75
-        }
-      })
+  const reponse = await fetch(url, {
+    headers: {
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'
     }
-  );
+  });
 
   if (!reponse.ok) {
     const details = await reponse.text();
-
-    throw new Error(
-      `ElevenLabs HTTP ${reponse.status}: ${details.slice(0, 300)}`
-    );
+    throw new Error(`Google TTS HTTP ${reponse.status}: ${details.slice(0, 300)}`);
   }
 
   return Buffer.from(await reponse.arrayBuffer());
@@ -1469,7 +1436,7 @@ async function traiterMessage(message) {
 }
 
 // ======================================================
-// RAPPELS ET MESSAGES PROGRAMMÉS (CORRIGÉ & STABLE)
+// RAPPELS ET MESSAGES PROGRAMMÉS
 // ======================================================
 
 async function envoyerAuGroupe(texte) {
