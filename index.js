@@ -768,7 +768,6 @@ async function envoyerReponseVocale(jid, texte, messageOriginal = null) {
   } catch (error) {
     console.error('❌ Réponse vocale impossible :', error.message);
 
-    // Si la synthèse vocale échoue, le bot répond quand même par écrit.
     return envoyerReponse(jid, texte, messageOriginal);
   }
 }
@@ -822,7 +821,7 @@ async function analyserImage(buffer, question = '') {
   } catch (error) {
     console.error('❌ Erreur analyse image :', error.message);
 
-    return 'Je n’arrive pas à analyser cette image pour le moment. Vérifie que le modèle de vision configuré est disponible avec ta clé Groq.';
+    return 'Je n’arrive pas à analyser cette image pour le moment.';
   }
 }
 
@@ -1061,7 +1060,6 @@ async function getCotisationsReport() {
       };
     });
 
-    // Les plus anciennes cotisations apparaissent en premier.
     transactions.sort((a, b) => {
       const dateA = a.date?.getTime() ?? Number.MAX_SAFE_INTEGER;
       const dateB = b.date?.getTime() ?? Number.MAX_SAFE_INTEGER;
@@ -1089,7 +1087,7 @@ async function getCotisationsReport() {
   } catch (error) {
     console.error('❌ Erreur rapport cotisations :', error.message);
 
-    return '❌ Impossible de récupérer les cotisations pour le moment. Vérifie la collection transactions dans Firebase.';
+    return '❌ Impossible de récupérer les cotisations pour le moment.';
   }
 }
 
@@ -1306,8 +1304,6 @@ async function traiterMessage(message) {
 
     const reponseAuBot = estReponseAuBot(message);
 
-    // En groupe, HBOT ne répond qu'aux commandes,
-    // aux mentions et aux réponses qui lui sont adressées.
     if (groupe && !commande && !mention && !reponseAuBot) {
       await ajouterMemoireGroupe(jid, texte);
       return;
@@ -1319,17 +1315,12 @@ async function traiterMessage(message) {
       `📩 Message de ${nom} dans ${jid} : ${texte.slice(0, 150)}`
     );
 
-    // Les commandes sont traitées avant l'IA.
     if (commande) {
       await traiterCommande(jid, texte, message);
       return;
     }
 
     const contenu = obtenirMessageReel(message);
-
-    // --------------------------------------------------
-    // IMAGE
-    // --------------------------------------------------
 
     if (contenu.imageMessage) {
       await envoyerTexte(jid, '👀 Je regarde ton image...');
@@ -1356,10 +1347,6 @@ async function traiterMessage(message) {
 
       return;
     }
-
-    // --------------------------------------------------
-    // AUDIO / MESSAGE VOCAL
-    // --------------------------------------------------
 
     if (estMessageAudio(message)) {
       try {
@@ -1406,7 +1393,7 @@ async function traiterMessage(message) {
 
         await envoyerReponse(
           jid,
-          'Désolé, je n’ai pas réussi à traiter ton message vocal. Vérifie la configuration de Whisper et réessaie.',
+          'Désolé, je n’ai pas réussi à traiter ton message vocal.',
           message
         );
       }
@@ -1414,29 +1401,20 @@ async function traiterMessage(message) {
       return;
     }
 
-    // --------------------------------------------------
-    // VIDÉO
-    // --------------------------------------------------
-
     if (contenu.videoMessage) {
       await envoyerReponse(
         jid,
-        '🎥 J’ai reçu ta vidéo. Pour l’instant, je peux t’aider à partir de sa description ou de son texte. Décris-moi ce que tu souhaites analyser.',
+        '🎥 J’ai reçu ta vidéo. Pour l’instant, je peux t’aider à partir de sa description ou de son texte.',
         message
       );
 
       return;
     }
 
-    // --------------------------------------------------
-    // MESSAGE TEXTE
-    // --------------------------------------------------
-
     if (!texte) {
       return;
     }
 
-    // Présentation explicite du bot et de son créateur.
     if (
       /\b(qui es[- ]tu|qui est[- ]tu|qui t['’]a créé|qui ta créé|ton créateur|ton createur|qui t['’]a développé|qui ta developpe)\b/i
         .test(texte)
@@ -1491,139 +1469,58 @@ async function traiterMessage(message) {
 }
 
 // ======================================================
-// RAPPELS ET MESSAGES PROGRAMMÉS
+// RAPPELS ET MESSAGES PROGRAMMÉS (CORRIGÉ & STABLE)
 // ======================================================
 
 async function envoyerAuGroupe(texte) {
-  if (!WHATSAPP_GROUP_ID) {
+  if (!WHATSAPP_GROUP_ID || !sock || !whatsappConnected) {
+    console.warn('⚠️ Envoi groupe impossible : non connecté ou ID manquant.');
     return;
   }
 
-  await envoyerTexte(WHATSAPP_GROUP_ID, texte);
+  try {
+    await sock.sendMessage(WHATSAPP_GROUP_ID, { text: texte });
+    console.log('✅ Message programmé envoyé au groupe avec succès.');
+  } catch (error) {
+    console.error('❌ Erreur envoi groupé programmé :', error.message);
+  }
 }
 
 function configurerCron() {
-  // Méditation quotidienne à 06 h 30.
+  // 1. Méditation quotidienne à 06 h 30 (Générée par l'IA Groq)
   cron.schedule(
     '30 6 * * *',
     async () => {
-      await envoyerAuGroupe(
-        '🌅 *BONJOUR À TOUS !* 🙏\n\n' +
-        'Que cette nouvelle journée soit remplie de paix, de sagesse et de courage.\n\n' +
-        'Prenons un moment pour prier, méditer et confier nos activités à Dieu. ✨'
-      );
-    },
-    { timezone: TIME_ZONE }
-  );
+      try {
+        const prompt = 'Génère une courte méditation biblique du matin. Donne un verset biblique exact, une explication très simple et un encouragement chaleureux. Maximum 5 lignes.';
+        const texteMeditation = await genererIA(prompt, 'meditation-matin');
 
-  // Veillée le premier et le dernier vendredi du mois.
-  cron.schedule(
-    '0 14 * * 5',
-    async () => {
-      const maintenant = new Date();
-
-      const jourDuMois = Number(
-        new Intl.DateTimeFormat('en-US', {
-          timeZone: TIME_ZONE,
-          day: 'numeric'
-        }).format(maintenant)
-      );
-
-      const dernierJour = Number(
-        new Intl.DateTimeFormat('en-US', {
-          timeZone: TIME_ZONE,
-          day: 'numeric'
-        }).format(
-          new Date(
-            Date.UTC(
-              Number(
-                new Intl.DateTimeFormat('en-US', {
-                  timeZone: TIME_ZONE,
-                  year: 'numeric'
-                }).format(maintenant)
-              ),
-              Number(
-                new Intl.DateTimeFormat('en-US', {
-                  timeZone: TIME_ZONE,
-                  month: 'numeric'
-                }).format(maintenant)
-              ),
-              0
-            )
-          )
-        )
-      );
-
-      const dernierVendredi = dernierJour - (
-        new Date(
-          Date.UTC(
-            maintenant.getUTCFullYear(),
-            maintenant.getUTCMonth(),
-            dernierJour
-          )
-        ).getUTCDay() === 5
-          ? 0
-          : 0
-      );
-
-      const premierVendredi = jourDuMois <= 7;
-
-      // On détermine le dernier vendredi à partir du calendrier local.
-      const mois = Number(
-        new Intl.DateTimeFormat('en-US', {
-          timeZone: TIME_ZONE,
-          month: 'numeric'
-        }).format(maintenant)
-      );
-
-      const annee = Number(
-        new Intl.DateTimeFormat('en-US', {
-          timeZone: TIME_ZONE,
-          year: 'numeric'
-        }).format(maintenant)
-      );
-
-      const dernierJourDuMois = new Date(
-        Date.UTC(annee, mois, 0)
-      ).getUTCDate();
-
-      let dernierVendrediDuMois = dernierJourDuMois;
-
-      while (
-        new Date(
-          Date.UTC(annee, mois - 1, dernierVendrediDuMois)
-        ).getUTCDay() !== 5
-      ) {
-        dernierVendrediDuMois--;
-      }
-
-      const estDernierVendredi =
-        jourDuMois === dernierVendrediDuMois;
-
-      if (premierVendredi || estDernierVendredi) {
         await envoyerAuGroupe(
-          '🙏 *INFORMATION : VEILLÉE DE PRIÈRE*\n\n' +
-          'Que chacun se prépare dans la prière et reste attentif aux informations communiquées par les responsables de l’église. ✨'
+          '🌅 *MÉDITATION DU MATIN* 🙏\n\n' +
+          texteMeditation +
+          '\n\nExcellente et bénie journée à tous ! ✨'
         );
+      } catch (err) {
+        console.error('❌ Erreur cron méditation :', err.message);
       }
     },
     { timezone: TIME_ZONE }
   );
 
-  // Programme du week-end : vendredi et samedi à 14 h.
+  // 2. Programme du week-end : vendredi et samedi à 14 h
   cron.schedule(
     '0 14 * * 5,6',
     async () => {
       await envoyerAuGroupe(
         '📅 *PROGRAMME DU WEEK-END*\n\n' +
         'Préparons-nous pour les activités de l’église. 🙏\n\n' +
-        'Pour les horaires et les détails exacts, veuillez vous référer aux responsables.'
+        'Pour les horaires et les détails exacts, veuillez vous référer au programme ou aux responsables.'
       );
     },
     { timezone: TIME_ZONE }
   );
 
-  // Rappel cotisation le samedi à 16 h.
+  // 3. Rappel cotisation le samedi à 16 h
   cron.schedule(
     '0 16 * * 6',
     async () => {
@@ -1635,7 +1532,7 @@ function configurerCron() {
     { timezone: TIME_ZONE }
   );
 
-  // Rappel le dimanche à 11 h 30.
+  // 4. Rappel le dimanche à 11 h 30
   cron.schedule(
     '30 11 * * 0',
     async () => {
@@ -1647,30 +1544,19 @@ function configurerCron() {
     { timezone: TIME_ZONE }
   );
 
-  // Rapport des cotisations le dimanche à 17 h.
+  // 5. Rapport des cotisations le dimanche à 17 h
   cron.schedule(
     '0 17 * * 0',
     async () => {
       const rapport = await getCotisationsReport();
-
-      await envoyerAuGroupe(rapport);
-    },
-    { timezone: TIME_ZONE }
-  );
-
-  // Message du dimanche à 20 h.
-  cron.schedule(
-    '0 20 * * 0',
-    async () => {
       await envoyerAuGroupe(
-        '🌙 *BONNE SOIRÉE À TOUS !*\n\n' +
-        'Que cette soirée soit paisible. Prenons soin les uns des autres et préparons la nouvelle semaine avec confiance. 🙏✨'
+        '📢 *BILAN DES COTISATIONS DU DIMANCHE* 🪙\n\n' + rapport
       );
     },
     { timezone: TIME_ZONE }
   );
 
-  console.log('✅ Tâches programmées configurées.');
+  console.log('✅ Tâches programmées configurées et fonctionnelles.');
 }
 
 // ======================================================
@@ -1756,7 +1642,7 @@ async function connectToWhatsApp() {
 
         if (statusCode === DisconnectReason.loggedOut) {
           console.error(
-            '🚫 Session déconnectée. Il faut supprimer l’ancienne session et rescanner le QR code.'
+            '🚫 Session déconnectée. Il faut rescanner le QR code.'
           );
 
           return;
@@ -1861,7 +1747,6 @@ app.get('/', async (req, res) => {
           <p class="ok">✅ WhatsApp connecté</p>
           <p>Le bot est opérationnel.</p>
           <p>Créateur : ${CREATOR_NAME}</p>
-          <p>Actualisation automatique toutes les 15 secondes.</p>
         </div>
       </body>
       </html>
@@ -1881,7 +1766,6 @@ app.get('/', async (req, res) => {
       <body style="font-family:Arial;text-align:center;padding:30px">
         <h1>🤖 ${BOT_NAME}</h1>
         <p>⏳ En attente du QR code WhatsApp...</p>
-        <p>Cette page s'actualise automatiquement.</p>
       </body>
       </html>
     `);
@@ -1924,8 +1808,6 @@ app.get('/', async (req, res) => {
         <h1>🤖 ${BOT_NAME}</h1>
         <p>📱 Scanne ce QR code avec WhatsApp.</p>
         <img src="${qrDataURL}" alt="QR code WhatsApp">
-        <p>WhatsApp → Appareils connectés → Connecter un appareil.</p>
-        <p>Cette page s'actualise automatiquement.</p>
       </div>
     </body>
     </html>
@@ -1938,14 +1820,7 @@ app.get('/health', (req, res) => {
     bot: BOT_NAME,
     whatsapp: whatsappConnected,
     groq: Boolean(groq),
-    whisper: Boolean(groq),
-    elevenlabs: Boolean(
-      ELEVENLABS_API_KEY && ELEVENLABS_VOICE_ID
-    ),
-    voiceReplyEnabled: VOICE_REPLY_ENABLED,
     firebase: Boolean(db),
-    webSearch: Boolean(process.env.TAVILY_API_KEY),
-    groupMemory: Boolean(db),
     time: obtenirDateAbidjan()
   });
 });
@@ -1966,6 +1841,5 @@ async function demarrer() {
 
 demarrer().catch(error => {
   console.error('❌ Erreur démarrage :', error);
-
   process.exitCode = 1;
 });
