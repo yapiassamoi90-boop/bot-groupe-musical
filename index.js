@@ -616,8 +616,9 @@ function nettoyerTextePourVoix(texte) {
     .replace(/[*_~#>|]/g, '')
     .replace(/\s+/g, ' ')
     .trim()
-    .slice(0, 1800);
+    .slice(0, 200); // Limité à 200 caractères pour éviter l'erreur 400 de Google TTS
 }
+
 
 async function genererAudioElevenLabs(texte) {
   const texteVoix = nettoyerTextePourVoix(texte);
