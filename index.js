@@ -1,4 +1,4 @@
-Import makeWASocket, {
+import makeWASocket, {
   useMultiFileAuthState,
   DisconnectReason,
   fetchLatestBaileysVersion,
