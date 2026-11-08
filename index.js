@@ -34,7 +34,7 @@ const BOT_NAME = process.env.BOT_NAME || 'HBOT';
 
 const CREATOR_NAME =
   process.env.CREATOR_NAME ||
-  'Assamoi Yapi Hyppolite, informaticien développeur';
+  'ASSAMOI Yapi Hyppolite informaticien développeur d’applications';
 
 const GROQ_API_KEY = process.env.GROQ_API_KEY || '';
 
@@ -254,7 +254,7 @@ const SYSTEM_PROMPT = `
 Tu es HBOT, un assistant WhatsApp intelligent,
 chaleureux, cultivé, bienveillant et naturel.
 
-Tu as été créé et développé par ASSAMOI YAPI HYPPOLITE informaticien développeur d'applications 
+Tu as été créé et développé par ${CREATOR_NAME}.
 
 IDENTITÉ :
 - Si quelqu'un demande qui tu es, présente-toi comme ${BOT_NAME}.
@@ -364,6 +364,19 @@ function obtenirNomExpediteur(message) {
 
 function obtenirJid(message) {
   return message?.key?.remoteJid || '';
+}
+
+function estMentionBot(texte = '') {
+  return /\b(h-?bot)\b/i.test(texte.toLowerCase());
+}
+
+function estReponseAuBot(message) {
+  const contenu = obtenirMessageReel(message);
+  const contextInfo = contenu.extendedTextMessage?.contextInfo || contenu.imageMessage?.contextInfo;
+  const stanzaId = contextInfo?.stanzaId;
+  if (!stanzaId) return false;
+  return contextInfo?.participant === sock?.user?.id ||
+    contextInfo?.participant?.startsWith(sock?.user?.id?.split(':')[0] || '###');
 }
 
 function estMessageAudio(message) {
@@ -488,11 +501,44 @@ async function envoyerReponseVocale(jid, texte, messageOriginal = null) {
 }
 
 // ======================================================
+// MÉMOIRE DE GROUPE FIRESTORE
+// ======================================================
+
+function encoderJid(jid) {
+  return Buffer.from(jid).toString('base64url');
+}
+
+async function ajouterMemoireGroupe(jid, texte) {
+  if (!db || !jid || !texte) return;
+  try {
+    const reference = db.collection('hbot2_group_memory').doc(encoderJid(jid));
+    await db.runTransaction(async transaction => {
+      const snapshot = await transaction.get(reference);
+      const anciennesMemoires = snapshot.exists ? snapshot.data().items || [] : [];
+      const items = [...anciennesMemoires, { text: texte.slice(0, 1000), date: new Date().toISOString() }].slice(-MAX_GROUP_MEMORY);
+      transaction.set(reference, { jid, items, updatedAt: admin.firestore.FieldValue.serverTimestamp() });
+    });
+  } catch (error) {
+    console.error('⚠️ Mémoire groupe :', error.message);
+  }
+}
+
+async function lireMemoireGroupe(jid) {
+  if (!db || !jid) return [];
+  try {
+    const snapshot = await db.collection('hbot2_group_memory').doc(encoderJid(jid)).get();
+    return snapshot.exists ? snapshot.data().items || [] : [];
+  } catch (error) {
+    return [];
+  }
+}
+
+// ======================================================
 // GESTION DES COTISATIONS (CUMUL PAR MEMBRE, JOANNA EN 1er)
 // ======================================================
 
 function obtenirNomTransaction(data) {
-  return String(data.name || data.memberName || data.nom || 'Membre').trim();
+  return String(data.name || data.memberName || data.nom || data.member || data.membre || 'Membre').trim();
 }
 
 function obtenirMontantTransaction(data) {
@@ -557,7 +603,6 @@ async function getCotisationsReport() {
   }
 }
 
-
 async function getImpayesReport() {
   if (!db) return '⚠️ Firebase indisponible.';
   try {
@@ -566,8 +611,7 @@ async function getImpayesReport() {
 
     snapshot.docs.forEach(doc => {
       const data = doc.data();
-      // On récupère le nom quel que soit le champ utilisé dans Firestore
-      const nomBrut = data.name || data.memberName || data.nom || data.member || data.membre || '';
+      const nomBrut = obtenirNomTransaction(data);
       if (nomBrut) {
         payeursSet.add(String(nomBrut).toLowerCase().trim());
       }
@@ -575,7 +619,6 @@ async function getImpayesReport() {
 
     const impayes = LISTE_OFFICIELLE_MEMBRES.filter(membre => {
       const nomMembre = membre.toLowerCase().trim();
-      // Vérifie si un payeur contient ou correspond au nom du membre officiel
       const estPaye = Array.from(payeursSet).some(payeur => payeur.includes(nomMembre));
       return !estPaye;
     });
@@ -656,7 +699,18 @@ async function traiterMessage(message) {
   if (!jid || jid === 'status@broadcast') return;
 
   const texte = obtenirTexteMessage(message);
-  if (estCommande(texte)) {
+  const groupe = estMessageDeGroupe(message);
+  const commande = estCommande(texte);
+  const mention = estMentionBot(texte);
+  const reponseAuBot = estReponseAuBot(message);
+
+  // Si c'est un groupe et que le bot n'est ni appelé ni commandé, il écoute sans répondre
+  if (groupe && !commande && !mention && !reponseAuBot) {
+    if (texte) await ajouterMemoireGroupe(jid, texte);
+    return;
+  }
+
+  if (commande) {
     await traiterCommande(jid, texte, message);
     return;
   }
@@ -675,7 +729,14 @@ async function traiterMessage(message) {
   }
 
   if (texte) {
-    const reponse = await genererIA(texte, obtenirConversationId(message));
+    const conversationId = obtenirConversationId(message);
+    const memoireGroupe = groupe ? await lireMemoireGroupe(jid) : [];
+    let question = texte;
+    if (memoireGroupe.length) {
+      question += '\n\nContexte mémorisé :\n' + memoireGroupe.slice(-8).map(i => `- ${i.text}`).join('\n');
+    }
+    const reponse = await genererIA(question, conversationId);
+    if (groupe) await ajouterMemoireGroupe(jid, texte);
     await envoyerReponse(jid, reponse, message);
   }
 }
