@@ -1,4 +1,4 @@
-import makeWASocket, {
+Import makeWASocket, {
   useMultiFileAuthState,
   DisconnectReason,
   fetchLatestBaileysVersion,
@@ -91,6 +91,13 @@ let reconnectTimer = null;
 
 const conversations = new Map();
 const processingMessages = new Set();
+
+// Liste officielle des membres du groupe (tu peux ajouter ou modifier des noms ici)
+const LISTE_OFFICIELLE_MEMBRES = [
+  "Joanna", "Armand", "Sea Franck", "Koulate jean Christ", 
+  "Samuel", "Issouph", "Nancy", "Marina", "Berenice", 
+  "Lili", "Mbro", "Diby", "Anne", "Mme Assamoi", "Mme Diallo", "Evodie", "Marie Ange"
+];
 
 // ======================================================
 // GROQ
@@ -276,7 +283,7 @@ function obtenirTexteMessage(message) {
 }
 
 function estCommande(texte = '') {
-  return /^!(aide|help|id|resetia|programme|cotisation|cotisations|c|setprogramme)\b/i
+  return /^!(aide|help|id|resetia|programme|cotisation|cotisations|c|setprogramme|retard|impayes)\b/i
     .test(texte.trim());
 }
 
@@ -604,7 +611,7 @@ async function transcrireAudio(buffer) {
 }
 
 // ======================================================
-// SYNTHÈSE VOCALE GRATUITE (GOOGLE TTS)
+// SYNTHÈSE VOCALE (GOOGLE TTS)
 // ======================================================
 
 function nettoyerTextePourVoix(texte) {
@@ -616,9 +623,8 @@ function nettoyerTextePourVoix(texte) {
     .replace(/[*_~#>|]/g, '')
     .replace(/\s+/g, ' ')
     .trim()
-    .slice(0, 200); // Limité à 200 caractères pour éviter l'erreur 400 de Google TTS
+    .slice(0, 200);
 }
-
 
 async function genererAudioElevenLabs(texte) {
   const texteVoix = nettoyerTextePourVoix(texte);
@@ -869,7 +875,7 @@ async function lireMemoireGroupe(jid) {
 }
 
 // ======================================================
-// COTISATIONS FIREBASE
+// COTISATIONS FIREBASE (CUMUL ET RETARDS/IMPAYÉS)
 // ======================================================
 
 function convertirDateCotisation(valeur) {
@@ -1013,6 +1019,8 @@ async function getCotisationsReport() {
         '',
         'Aucune cotisation enregistrée pour le moment.',
         '',
+        '💰 *CUMUL TOTAL : 0 FCFA*',
+        '',
         '💡 Merci pour votre fidélité ! 🙏✨'
       ].join('\n');
     }
@@ -1035,12 +1043,14 @@ async function getCotisationsReport() {
       return dateA - dateB;
     });
 
+    let cumulTotal = 0;
+
     const lignes = transactions.map((transaction, index) => {
       const symbole = index === 0 ? '🥇' : '✅';
-
       const date = formaterDateCotisation(transaction.date);
-
       const montant = formaterMontant(transaction.montant);
+
+      cumulTotal += transaction.montant;
 
       return `${symbole} *${transaction.nom}* : +${montant} FCFA _(${date})_`;
     });
@@ -1049,6 +1059,8 @@ async function getCotisationsReport() {
       '📊 *CLASSEMENT DES COTISATIONS* 🪙',
       '',
       ...lignes,
+      '',
+      `💰 *CUMUL TOTAL : ${formaterMontant(cumulTotal)} FCFA*`,
       '',
       '💡 Merci pour votre fidélité ! 🙏✨'
     ].join('\n');
@@ -1059,86 +1071,79 @@ async function getCotisationsReport() {
   }
 }
 
-// ======================================================
-// PROGRAMME DE L'ÉGLISE
-// ======================================================
-
-function obtenirJourAbidjan(date = new Date()) {
-  const jour = new Intl.DateTimeFormat('en-US', {
-    timeZone: TIME_ZONE,
-    weekday: 'long'
-  }).format(date);
-
-  return jour.toLowerCase();
-}
-
-function obtenirDateLocaleAbidjan(date = new Date()) {
-  const parties = new Intl.DateTimeFormat('en-CA', {
-    timeZone: TIME_ZONE,
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit'
-  }).formatToParts(date);
-
-  const valeurs = Object.fromEntries(
-    parties.map(partie => [partie.type, partie.value])
-  );
-
-  return `${valeurs.year}-${valeurs.month}-${valeurs.day}`;
-}
-
-function obtenirProgrammeDuDimanche() {
-  const maintenant = new Date();
-
-  const dateLocale = obtenirDateLocaleAbidjan(maintenant);
-
-  const jour = obtenirJourAbidjan(maintenant);
-
-  const decalages = {
-    monday: 6,
-    tuesday: 5,
-    wednesday: 4,
-    thursday: 3,
-    friday: 2,
-    saturday: 1,
-    sunday: 0
-  };
-
-  const decalage = decalages[jour] ?? 0;
-
-  const dateDimanche = new Date(
-    `${dateLocale}T12:00:00Z`
-  );
-
-  dateDimanche.setUTCDate(
-    dateDimanche.getUTCDate() + decalage
-  );
-
-  return new Intl.DateTimeFormat('fr-FR', {
-    timeZone: TIME_ZONE,
-    weekday: 'long',
-    day: 'numeric',
-    month: 'long',
-    year: 'numeric'
-  }).format(dateDimanche);
-}
-
-let programmePersonnalise = '';
-
-function obtenirProgramme() {
-  if (programmePersonnalise) {
-    return programmePersonnalise;
+// Nouvelle fonction pour afficher ceux qui n'ont pas encore payé (retards/impayés)
+async function getImpayesReport() {
+  if (!db) {
+    return '⚠️ Le service Firebase est indisponible.';
   }
 
-  return [
-    '📅 *PROGRAMME DE L’ÉGLISE*',
-    '',
-    '🙏 Pour connaître les horaires précis des cultes,',
-    'merci de consulter les responsables de l’église.',
-    '',
-    '📌 Prochaine date dominicale :',
-    obtenirProgrammeDuDimanche()
-  ].join('\n');
+  try {
+    const snapshot = await db
+      .collection('transactions')
+      .limit(100)
+      .get();
+
+    // Récupérer la liste des noms de ceux qui ont payé (en minuscules pour éviter les erreurs de casse)
+    const payeursSet = new Set();
+    snapshot.docs.forEach(doc => {
+      const nom = obtenirNomTransaction(doc.data()).toLowerCase().trim();
+      payeursSet.add(nom);
+    });
+
+    // Filtrer la liste officielle pour trouver ceux qui ne sont pas dans les payeurs
+    const impayes = LISTE_OFFICIELLE_MEMBRES.filter(
+      membre => !payeursSet.has(membre.toLowerCase().trim())
+    );
+
+    if (impayes.length === 0) {
+      return [
+        '🎉 *ÉTAT DES COTISATIONS* 🪙',
+        '',
+        'Félicitations ! *Tout le monde* a payé sa cotisation. Personne n’est en retard ! 🌟'
+      ].join('\n');
+    }
+
+    const lignesImpayes = impayes.map(membre => `❌ *${membre}* (En retard)`).join('\n');
+
+    return [
+      '⏳ *LISTE DES PERSONNES EN RETARD (IMPAYÉS)* ⚠️',
+      '',
+      lignesImpayes,
+      '',
+      `Total en retard : *${impayes.length} personne(s)*`,
+      '',
+      '💡 Pensez à régulariser votre situation svp ! 🙏'
+    ].join('\n');
+
+  } catch (error) {
+    console.error('❌ Erreur rapport impayés :', error.message);
+    return '❌ Impossible de récupérer la liste des retards pour le moment.';
+  }
+}
+
+// ======================================================
+// PROGRAMME DE L'ÉGLISE (NOVEMBRE ET DÉCEMBRE)
+// ======================================================
+
+let texteProgrammeMois = `⛪ *ÉGLISE DES ASSEMBLÉES DE DIEU ABOBO BELLEVILLE - TEMPLE LA RESTAURATION DIVINE*
+
+📅 *PROGRAMME DES MOIS DE NOVEMBRE ET DÉCEMBRE (GROUPE MUSICAL)*
+
+🔴 *NOVEMBRE*
+• *01/11/26* : Adoration: Anne | Célébration: Nancy | 1ère & 2e Offrande: Mme Diby
+• *08/11/26* : Adoration: Joanne | Célébration: Mme M'Bro | 1ère & 2e Offrande: Mme Diallo
+• *15/11/26* : Adoration: Nancy | Célébration: Anne | 1ère & 2e Offrande: Marie-Ange
+• *22/11/26* : Adoration: Berenice | Célébration: Mme Diallo | 1ère & 2e Offrande: Joanne
+• *29/11/26* : Adoration: Mme M'Bro | Célébration: Marie Ange | 1ère & 2e Offrande: Nancy
+
+🟢 *DÉCEMBRE*
+• *06/12/26* : Adoration: Mme Diallo | Célébration: Berenice | 1ère & 2e Offrande: Anne
+• *13/12/26* : Adoration: Nancy | Célébration: Joanne | 1ère & 2e Offrande: Mme M'Bro
+• *20/12/26* : Adoration: Marie Ange | Célébration: Mme Diallo | 1ère & 2e Offrande: Berenice
+• *27/12/26* : Adoration: Joanne | Célébration: Anne | 1ère & 2e Offrande: Mme Diby`;
+
+function obtenirProgramme() {
+  return texteProgrammeMois;
 }
 
 // ======================================================
@@ -1157,12 +1162,11 @@ async function traiterCommande(jid, texte, message) {
         '🆔 `!id` — afficher l’identifiant du groupe',
         '🧠 `!resetia` — réinitialiser ma mémoire de conversation',
         '📅 `!programme` — afficher le programme',
-        '🪙 `!cotisation` — afficher les cotisations',
-        '🪙 `!cotisations` — afficher les cotisations',
-        '🪙 `!c` — raccourci des cotisations',
+        '🪙 `!cotisation` — afficher les cotisations et le cumul total',
+        '⚠️ `!retard` (ou `!impayes`) — afficher la liste de ceux qui n’ont pas payé',
         '📌 `!setprogramme texte` — définir le programme',
         '',
-        'Tu peux aussi me mentionner pour me poser une question.'
+        'Tu peux aussi me mentionner ou m’envoyer un message vocal.'
       ].join('\n');
 
       await envoyerReponse(jid, aide, message);
@@ -1207,6 +1211,14 @@ async function traiterCommande(jid, texte, message) {
       return true;
     }
 
+    case '!retard':
+    case '!impayes': {
+      const rapportRetard = await getImpayesReport();
+
+      await envoyerReponse(jid, rapportRetard, message);
+      return true;
+    }
+
     case '!setprogramme': {
       const nouveauProgramme = texte
         .replace(/^!setprogramme\s*/i, '')
@@ -1222,11 +1234,11 @@ async function traiterCommande(jid, texte, message) {
         return true;
       }
 
-      programmePersonnalise = nouveauProgramme;
+      texteProgrammeMois = nouveauProgramme;
 
       await envoyerReponse(
         jid,
-        '✅ Programme personnalisé mis à jour en mémoire.',
+        '✅ Programme mis à jour en mémoire.',
         message
       );
 
@@ -1369,16 +1381,6 @@ async function traiterMessage(message) {
       return;
     }
 
-    if (contenu.videoMessage) {
-      await envoyerReponse(
-        jid,
-        '🎥 J’ai reçu ta vidéo. Pour l’instant, je peux t’aider à partir de sa description ou de son texte.',
-        message
-      );
-
-      return;
-    }
-
     if (!texte) {
       return;
     }
@@ -1455,7 +1457,7 @@ async function envoyerAuGroupe(texte) {
 }
 
 function configurerCron() {
-  // 1. Méditation quotidienne à 06 h 30 (Générée par l'IA Groq)
+  // 1. Méditation quotidienne à 06 h 30
   cron.schedule(
     '30 6 * * *',
     async () => {
@@ -1475,44 +1477,7 @@ function configurerCron() {
     { timezone: TIME_ZONE }
   );
 
-  // 2. Programme du week-end : vendredi et samedi à 14 h
-  cron.schedule(
-    '0 14 * * 5,6',
-    async () => {
-      await envoyerAuGroupe(
-        '📅 *PROGRAMME DU WEEK-END*\n\n' +
-        'Préparons-nous pour les activités de l’église. 🙏\n\n' +
-        'Pour les horaires et les détails exacts, veuillez vous référer au programme ou aux responsables.'
-      );
-    },
-    { timezone: TIME_ZONE }
-  );
-
-  // 3. Rappel cotisation le samedi à 16 h
-  cron.schedule(
-    '0 16 * * 6',
-    async () => {
-      await envoyerAuGroupe(
-        '🪙 *RAPPEL DES COTISATIONS*\n\n' +
-        'N’oublions pas notre participation pour les activités prévues. Merci à chacun pour son engagement et sa fidélité. 🙏'
-      );
-    },
-    { timezone: TIME_ZONE }
-  );
-
-  // 4. Rappel le dimanche à 11 h 30
-  cron.schedule(
-    '30 11 * * 0',
-    async () => {
-      await envoyerAuGroupe(
-        '🙏 *BON DIMANCHE À TOUS !*\n\n' +
-        'Que Dieu nous accompagne en cette journée. Restons attentifs aux informations relatives au programme de l’église. ✨'
-      );
-    },
-    { timezone: TIME_ZONE }
-  );
-
-  // 5. Rapport des cotisations le dimanche à 17 h
+  // 2. Rapport des cotisations le dimanche à 17 h
   cron.schedule(
     '0 17 * * 0',
     async () => {
