@@ -92,7 +92,7 @@ let reconnectTimer = null;
 const conversations = new Map();
 const processingMessages = new Set();
 
-// Liste officielle des membres du groupe (tu peux ajouter ou modifier des noms ici)
+// Liste officielle des membres du groupe
 const LISTE_OFFICIELLE_MEMBRES = [
   "Joanna", "Armand", "Sea Franck", "Koulate jean Christ", 
   "Samuel", "Issouph", "Nancy", "Marina", "Berenice", 
@@ -167,6 +167,86 @@ try {
 }
 
 // ======================================================
+// GESTION PERSISTANTE DES CREDENTIALS DANS FIREBASE
+// ======================================================
+
+async function useFirebaseAuthState() {
+  const baseDir = AUTH_DIR;
+  if (!existsSync(baseDir)) {
+    await fs.mkdir(baseDir, { recursive: true });
+  }
+
+  const readData = async (file) => {
+    try {
+      if (db) {
+        const docRef = db.collection('whatsapp_auth').doc(file.replace(/[/\\.]/g, '_'));
+        const doc = await docRef.get();
+        if (doc.exists && doc.data()?.content) {
+          return JSON.parse(doc.data().content, (k, v) => {
+            if (v !== null && typeof v === 'object' && v.type === 'Buffer') {
+              return Buffer.from(v.data);
+            }
+            return v;
+          });
+        }
+      }
+      const filePath = path.join(baseDir, file);
+      if (existsSync(filePath)) {
+        return JSON.parse(await fs.readFile(filePath, 'utf8'));
+      }
+    } catch (e) {
+      console.error(`Erreur lecture auth ${file}:`, e.message);
+    }
+    return null;
+  };
+
+  const writeData = async (data, file) => {
+    try {
+      const filePath = path.join(baseDir, file);
+      const stringified = JSON.stringify(data, (k, v) => (v instanceof Buffer ? { type: 'Buffer', data: Array.from(v) } : v));
+      await fs.writeFile(filePath, stringified, 'utf8');
+
+      if (db) {
+        const docRef = db.collection('whatsapp_auth').doc(file.replace(/[/\\.]/g, '_'));
+        await docRef.set({ content: stringified, updatedAt: new Date() });
+      }
+    } catch (e) {
+      console.error(`Erreur écriture auth ${file}:`, e.message);
+    }
+  };
+
+  const creds = (await readData('creds.json')) || (await import('@whiskeysockets/baileys')).initAuthCreds();
+
+  return {
+    state: {
+      creds,
+      keys: {
+        get: async (type, ids) => {
+          const data = {};
+          for (const id of ids) {
+            let value = await readData(`${type}-${id}.json`);
+            data[id] = value;
+          }
+          return data;
+        },
+        set: async (data) => {
+          const tasks = [];
+          for (const category of Object.keys(data)) {
+            for (const id of Object.keys(data[category])) {
+              const value = data[category][id];
+              const file = `${category}-${id}.json`;
+              tasks.push(value ? writeData(value, file) : fs.unlink(path.join(AUTH_DIR, file)).catch(() => {}));
+            }
+          }
+          await Promise.all(tasks);
+        }
+      }
+    },
+    saveCreds: () => writeData(creds, 'creds.json')
+  };
+}
+
+// ======================================================
 // IDENTITÉ ET INSTRUCTIONS DE L’IA
 // ======================================================
 
@@ -191,30 +271,11 @@ STYLE :
 - Utilise les emojis avec modération.
 - Ne suppose jamais le sexe de la personne qui t'écrit.
 - Si un message contient des fautes, comprends son intention sans la ridiculiser.
-
-CONTEXTE :
-Tu peux aider avec les études, la technologie, la culture générale,
-la vie quotidienne, les explications bibliques et les questions pratiques.
-
-ÉGLISE :
-Lorsque c'est pertinent, réponds avec respect aux questions bibliques.
-Ne prétends pas connaître des informations qui ne t'ont pas été données.
-N'invente pas les horaires, les décisions ou les événements de l'église.
-
-FIABILITÉ :
-- Si tu ne connais pas une information, dis-le honnêtement.
-- Ne prétends pas avoir effectué une recherche Internet si ce n'est pas le cas.
-- Ne prétends pas avoir envoyé un fichier ou réalisé une action que tu n'as pas effectuée.
-- Respecte toujours la question posée.
 `;
 
 // ======================================================
 // OUTILS GÉNÉRAUX
 // ======================================================
-
-function attendre(ms) {
-  return new Promise(resolve => setTimeout(resolve, ms));
-}
 
 function nettoyerTexte(texte = '') {
   return String(texte)
@@ -255,11 +316,6 @@ function obtenirMessageReel(message) {
       continue;
     }
 
-    if (contenu.documentWithCaptionMessage?.message) {
-      contenu = contenu.documentWithCaptionMessage.message;
-      continue;
-    }
-
     break;
   }
 
@@ -275,9 +331,6 @@ function obtenirTexteMessage(message) {
     contenu.imageMessage?.caption ||
     contenu.videoMessage?.caption ||
     contenu.documentMessage?.caption ||
-    contenu.buttonsResponseMessage?.selectedDisplayText ||
-    contenu.listResponseMessage?.title ||
-    contenu.templateButtonReplyMessage?.selectedDisplayText ||
     ''
   ).trim();
 }
@@ -288,11 +341,7 @@ function estCommande(texte = '') {
 }
 
 function extraireJidParticipant(message) {
-  return (
-    message?.key?.participant ||
-    message?.participant ||
-    ''
-  );
+  return message?.key?.participant || message?.participant || '';
 }
 
 function estMessageDeMoi(message) {
@@ -306,823 +355,226 @@ function estMessageDeGroupe(message) {
 function obtenirConversationId(message) {
   const jid = message?.key?.remoteJid || '';
   const participant = extraireJidParticipant(message);
-
-  return estMessageDeGroupe(message)
-    ? `${jid}:${participant}`
-    : jid;
+  return estMessageDeGroupe(message) ? `${jid}:${participant}` : jid;
 }
 
 function obtenirNomExpediteur(message) {
-  return (
-    message?.pushName ||
-    message?.verifiedBizName ||
-    'Ami'
-  );
+  return message?.pushName || message?.verifiedBizName || 'Ami';
 }
 
 function obtenirJid(message) {
   return message?.key?.remoteJid || '';
 }
 
-function estMentionBot(message, texte = '') {
-  const contenu = obtenirMessageReel(message);
-
-  const mentions =
-    contenu.extendedTextMessage?.contextInfo?.mentionedJid ||
-    contenu.imageMessage?.contextInfo?.mentionedJid ||
-    contenu.videoMessage?.contextInfo?.mentionedJid ||
-    [];
-
-  if (
-    mentions.some(jid =>
-      String(jid).includes('status')
-    )
-  ) {
-    return true;
-  }
-
-  const monJid = sock?.user?.id || '';
-  const monNumero = monJid.split(':')[0].split('@')[0];
-
-  const texteNormalise = texte.toLowerCase();
-
-  if (
-    monNumero &&
-    texteNormalise.includes(monNumero)
-  ) {
-    return true;
-  }
-
-  return /\b(hbot|bot)\b/i.test(texte);
-}
-
-function estReponseAuBot(message) {
-  const contenu = obtenirMessageReel(message);
-
-  const contextInfo =
-    contenu.extendedTextMessage?.contextInfo ||
-    contenu.imageMessage?.contextInfo ||
-    contenu.videoMessage?.contextInfo ||
-    contenu.audioMessage?.contextInfo;
-
-  const stanzaId = contextInfo?.stanzaId;
-
-  if (!stanzaId) {
-    return false;
-  }
-
-  return contextInfo?.participant === sock?.user?.id ||
-    contextInfo?.participant?.startsWith(
-      sock?.user?.id?.split(':')[0] || '###'
-    );
-}
-
 function estMessageAudio(message) {
   const contenu = obtenirMessageReel(message);
-
-  return Boolean(
-    contenu.audioMessage ||
-    contenu.pttMessage
-  );
-}
-
-function estMessageImage(message) {
-  const contenu = obtenirMessageReel(message);
-
-  return Boolean(contenu.imageMessage);
-}
-
-function estMessageVideo(message) {
-  const contenu = obtenirMessageReel(message);
-
-  return Boolean(contenu.videoMessage);
+  return Boolean(contenu.audioMessage || contenu.pttMessage);
 }
 
 // ======================================================
-// MÉMOIRE DES CONVERSATIONS
+// HISTORIQUE ET IA
 // ======================================================
 
 function obtenirHistorique(conversationId) {
   if (!conversations.has(conversationId)) {
     conversations.set(conversationId, []);
   }
-
   return conversations.get(conversationId);
 }
 
 function ajouterHistorique(conversationId, role, content) {
   const historique = obtenirHistorique(conversationId);
-
-  historique.push({
-    role,
-    content
-  });
-
-  while (historique.length > MAX_HISTORY * 2) {
-    historique.shift();
-  }
-
-  if (conversations.size > MAX_CONVERSATIONS) {
-    const premiereCle = conversations.keys().next().value;
-
-    if (premiereCle) {
-      conversations.delete(premiereCle);
-    }
-  }
+  historique.push({ role, content });
+  while (historique.length > MAX_HISTORY * 2) historique.shift();
 }
 
 function reinitialiserHistorique(conversationId) {
   conversations.delete(conversationId);
 }
 
-// ======================================================
-// RÉPONSE IA GROQ
-// ======================================================
-
 async function genererIA(texte, conversationId, options = {}) {
-  if (!groq) {
-    return 'Désolé, mon service d’intelligence artificielle n’est pas configuré pour le moment.';
-  }
-
+  if (!groq) return 'Service IA non configuré.';
   const historique = obtenirHistorique(conversationId);
-
-  const messages = [
-    {
-      role: 'system',
-      content: SYSTEM_PROMPT
-    },
-    ...historique,
-    {
-      role: 'user',
-      content: texte
-    }
-  ];
-
   try {
     const reponse = await groq.chat.completions.create({
       model: options.model || GROQ_MODEL,
-      messages,
+      messages: [{ role: 'system', content: SYSTEM_PROMPT }, ...historique, { role: 'user', content: texte }],
       max_completion_tokens: 1200
     });
-
-    const resultat = nettoyerTexte(
-      reponse.choices?.[0]?.message?.content || ''
-    );
-
-    if (!resultat) {
-      return 'Je n’ai pas réussi à formuler une réponse. Peux-tu reformuler ta question ?';
-    }
-
+    const resultat = nettoyerTexte(reponse.choices?.[0]?.message?.content || '');
     ajouterHistorique(conversationId, 'user', texte);
     ajouterHistorique(conversationId, 'assistant', resultat);
-
     return resultat;
   } catch (error) {
-    console.error('❌ Erreur Groq :', error.message);
-
-    return 'Je rencontre actuellement un problème pour répondre. Réessaie dans un instant.';
+    return 'Je rencontre un problème technique.';
   }
 }
 
 // ======================================================
-// ENVOI DE MESSAGES WHATSAPP
+// ENVOI DE MESSAGES & MÉDIAS
 // ======================================================
 
 async function envoyerTexte(jid, texte, options = {}) {
-  if (!sock || !whatsappConnected) {
-    console.warn('⚠️ Envoi impossible : WhatsApp non connecté.');
-    return false;
-  }
-
+  if (!sock || !whatsappConnected) return false;
   try {
-    await sock.sendMessage(jid, {
-      text: String(texte),
-      ...options
-    });
-
+    await sock.sendMessage(jid, { text: String(texte), ...options });
     return true;
   } catch (error) {
-    console.error('❌ Erreur envoi WhatsApp :', error.message);
     return false;
   }
 }
 
 async function envoyerReponse(jid, texte, messageOriginal = null) {
-  if (!sock || !whatsappConnected) {
-    return false;
-  }
-
+  if (!sock || !whatsappConnected) return false;
   try {
-    const options = {};
-
-    if (messageOriginal?.key) {
-      options.quoted = messageOriginal;
-    }
-
-    await sock.sendMessage(jid, {
-      text: texte,
-      ...options
-    });
-
+    const options = messageOriginal?.key ? { quoted: messageOriginal } : {};
+    await sock.sendMessage(jid, { text: texte, ...options });
     return true;
   } catch (error) {
-    console.error('❌ Erreur réponse :', error.message);
     return false;
   }
 }
-
-// ======================================================
-// TÉLÉCHARGEMENT DES MÉDIAS
-// ======================================================
 
 async function telechargerMedia(message, type) {
   const contenu = obtenirMessageReel(message);
-
-  let media;
-
-  if (type === 'audio') {
-    media = contenu.audioMessage || contenu.pttMessage;
-  } else if (type === 'image') {
-    media = contenu.imageMessage;
-  } else if (type === 'video') {
-    media = contenu.videoMessage;
-  }
-
-  if (!media) {
-    throw new Error(`Média ${type} introuvable.`);
-  }
-
+  const media = type === 'audio' ? (contenu.audioMessage || contenu.pttMessage) : contenu.imageMessage;
+  if (!media) throw new Error('Média introuvable.');
   const stream = await downloadContentFromMessage(media, type);
-
   const morceaux = [];
-  let taille = 0;
-
-  const limite =
-    type === 'audio'
-      ? MAX_AUDIO_SIZE
-      : MAX_IMAGE_SIZE;
-
-  for await (const morceau of stream) {
-    taille += morceau.length;
-
-    if (taille > limite) {
-      throw new Error('Le fichier est trop volumineux.');
-    }
-
-    morceaux.push(morceau);
-  }
-
+  for await (const morceau of stream) morceaux.push(morceau);
   return Buffer.concat(morceaux);
 }
 
-// ======================================================
-// TRANSCRIPTION AUDIO AVEC WHISPER
-// ======================================================
-
 async function transcrireAudio(buffer) {
-  if (!groq) {
-    throw new Error('Groq n’est pas configuré.');
-  }
-
-  const fichier = await toFile(
-    buffer,
-    'message.ogg',
-    {
-      type: 'audio/ogg'
-    }
-  );
-
-  const resultat = await groq.audio.transcriptions.create({
-    file: fichier,
-    model: WHISPER_MODEL,
-    language: 'fr',
-    response_format: 'text'
-  });
-
-  const texte = typeof resultat === 'string'
-    ? resultat
-    : resultat.text || '';
-
-  if (!texte.trim()) {
-    throw new Error('Aucune parole détectée dans le message audio.');
-  }
-
-  return texte.trim();
-}
-
-// ======================================================
-// SYNTHÈSE VOCALE (GOOGLE TTS)
-// ======================================================
-
-function nettoyerTextePourVoix(texte) {
-  return String(texte)
-    .replace(/```[\s\S]*?```/g, ' ')
-    .replace(/`([^`]+)`/g, '$1')
-    .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
-    .replace(/https?:\/\/\S+/g, '')
-    .replace(/[*_~#>|]/g, '')
-    .replace(/\s+/g, ' ')
-    .trim()
-    .slice(0, 200);
+  const fichier = await toFile(buffer, 'message.ogg', { type: 'audio/ogg' });
+  const resultat = await groq.audio.transcriptions.create({ file: fichier, model: WHISPER_MODEL, language: 'fr', response_format: 'text' });
+  return typeof resultat === 'string' ? resultat : resultat.text || '';
 }
 
 async function genererAudioElevenLabs(texte) {
-  const texteVoix = nettoyerTextePourVoix(texte);
-
-  if (!texteVoix) {
-    throw new Error('Aucun texte à convertir en audio.');
-  }
-
-  const url = `https://translate.google.com/translate_tts?ie=UTF-8&q=${encodeURIComponent(texteVoix)}&tl=fr&client=tw-ob`;
-
-  const reponse = await fetch(url, {
-    headers: {
-      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'
-    }
-  });
-
-  if (!reponse.ok) {
-    const details = await reponse.text();
-    throw new Error(`Google TTS HTTP ${reponse.status}: ${details.slice(0, 300)}`);
-  }
-
+  const url = `https://translate.google.com/translate_tts?ie=UTF-8&q=${encodeURIComponent(nettoyerTexte(texte).slice(0, 200))}&tl=fr&client=tw-ob`;
+  const reponse = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0' } });
   return Buffer.from(await reponse.arrayBuffer());
 }
 
-// ======================================================
-// CONVERSION MP3 VERS OGG/OPUS POUR WHATSAPP
-// ======================================================
-
 async function convertirMp3EnOgg(mp3Buffer) {
-  if (!ffmpegPath) {
-    throw new Error('FFmpeg n’est pas disponible.');
-  }
-
-  const dossier = await fs.mkdtemp(
-    path.join(os.tmpdir(), 'hbot-audio-')
-  );
-
+  const dossier = await fs.mkdtemp(path.join(os.tmpdir(), 'hbot-'));
   const mp3Path = path.join(dossier, 'input.mp3');
   const oggPath = path.join(dossier, 'output.ogg');
-
   try {
     await fs.writeFile(mp3Path, mp3Buffer);
-
     await new Promise((resolve, reject) => {
-      const processus = spawn(ffmpegPath, [
-        '-y',
-        '-i', mp3Path,
-        '-vn',
-        '-ac', '1',
-        '-ar', '48000',
-        '-c:a', 'libopus',
-        '-b:a', '32k',
-        '-f', 'ogg',
-        oggPath
-      ]);
-
-      let stderr = '';
-
-      processus.stderr.on('data', data => {
-        stderr += data.toString();
-      });
-
-      processus.on('error', reject);
-
-      processus.on('close', code => {
-        if (code === 0) {
-          resolve();
-        } else {
-          reject(
-            new Error(`Conversion audio échouée : ${stderr.slice(-500)}`)
-          );
-        }
-      });
+      const proc = spawn(ffmpegPath, ['-y', '-i', mp3Path, '-vn', '-ac', '1', '-ar', '48000', '-c:a', 'libopus', '-b:a', '32k', '-f', 'ogg', oggPath]);
+      proc.on('close', code => code === 0 ? resolve() : reject());
     });
-
     return await fs.readFile(oggPath);
   } finally {
-    await fs.rm(dossier, {
-      recursive: true,
-      force: true
-    });
+    await fs.rm(dossier, { recursive: true, force: true });
   }
 }
 
-// ======================================================
-// RÉPONSE VOCALE
-// ======================================================
-
 async function envoyerReponseVocale(jid, texte, messageOriginal = null) {
-  if (!VOICE_REPLY_ENABLED) {
-    return envoyerReponse(jid, texte, messageOriginal);
-  }
-
+  if (!VOICE_REPLY_ENABLED) return envoyerReponse(jid, texte, messageOriginal);
   try {
     const mp3 = await genererAudioElevenLabs(texte);
     const ogg = await convertirMp3EnOgg(mp3);
-
-    if (!sock || !whatsappConnected) {
-      return false;
-    }
-
-    const options = {
-      audio: ogg,
-      mimetype: 'audio/ogg; codecs=opus',
-      ptt: true
-    };
-
-    if (messageOriginal?.key) {
-      options.quoted = messageOriginal;
-    }
-
+    const options = { audio: ogg, mimetype: 'audio/ogg; codecs=opus', ptt: true };
+    if (messageOriginal?.key) options.quoted = messageOriginal;
     await sock.sendMessage(jid, options);
-
     return true;
-  } catch (error) {
-    console.error('❌ Réponse vocale impossible :', error.message);
-
+  } catch (e) {
     return envoyerReponse(jid, texte, messageOriginal);
   }
 }
 
 // ======================================================
-// ANALYSE D'IMAGE AVEC GROQ VISION
+// GESTION DES COTISATIONS (CUMUL PAR MEMBRE, JOANNA EN 1er)
 // ======================================================
-
-async function analyserImage(buffer, question = '') {
-  if (!groq) {
-    return 'Le service d’analyse d’image n’est pas configuré.';
-  }
-
-  const base64 = buffer.toString('base64');
-
-  const prompt = question.trim()
-    ? `Analyse cette image et réponds à la question suivante : ${question}`
-    : 'Décris cette image avec précision en français.';
-
-  try {
-    const resultat = await groq.chat.completions.create({
-      model: GROQ_VISION_MODEL,
-      messages: [
-        {
-          role: 'system',
-          content: SYSTEM_PROMPT
-        },
-        {
-          role: 'user',
-          content: [
-            {
-              type: 'text',
-              text: prompt
-            },
-            {
-              type: 'image_url',
-              image_url: {
-                url: `data:image/jpeg;base64,${base64}`
-              }
-            }
-          ]
-        }
-      ],
-      max_completion_tokens: 1000
-    });
-
-    return nettoyerTexte(
-      resultat.choices?.[0]?.message?.content ||
-      'Je n’ai pas réussi à analyser cette image.'
-    );
-  } catch (error) {
-    console.error('❌ Erreur analyse image :', error.message);
-
-    return 'Je n’arrive pas à analyser cette image pour le moment.';
-  }
-}
-
-// ======================================================
-// MÉMOIRE DE GROUPE FIRESTORE
-// ======================================================
-
-function encoderJid(jid) {
-  return Buffer.from(jid).toString('base64url');
-}
-
-async function ajouterMemoireGroupe(jid, texte) {
-  if (!db || !jid || !texte) {
-    return;
-  }
-
-  const motsCles =
-    /cotisation|cotisations|fcfa|prix|date|heure|lieu|sortie|voyage|réunion|reunion|décision|decision|programme/i;
-
-  if (!motsCles.test(texte)) {
-    return;
-  }
-
-  try {
-    const reference = db
-      .collection('hbot2_group_memory')
-      .doc(encoderJid(jid));
-
-    await db.runTransaction(async transaction => {
-      const snapshot = await transaction.get(reference);
-
-      const anciennesMemoires = snapshot.exists
-        ? snapshot.data().items || []
-        : [];
-
-      const nouvelleMemoire = {
-        text: texte.slice(0, 1000),
-        date: new Date().toISOString()
-      };
-
-      const items = [
-        ...anciennesMemoires,
-        nouvelleMemoire
-      ].slice(-MAX_GROUP_MEMORY);
-
-      transaction.set(reference, {
-        jid,
-        items,
-        updatedAt: admin.firestore.FieldValue.serverTimestamp()
-      });
-    });
-  } catch (error) {
-    console.error('⚠️ Mémoire groupe :', error.message);
-  }
-}
-
-async function lireMemoireGroupe(jid) {
-  if (!db || !jid) {
-    return [];
-  }
-
-  try {
-    const snapshot = await db
-      .collection('hbot2_group_memory')
-      .doc(encoderJid(jid))
-      .get();
-
-    if (!snapshot.exists) {
-      return [];
-    }
-
-    return snapshot.data().items || [];
-  } catch (error) {
-    console.error('⚠️ Lecture mémoire groupe :', error.message);
-    return [];
-  }
-}
-
-// ======================================================
-// COTISATIONS FIREBASE (CUMUL ET RETARDS/IMPAYÉS)
-// ======================================================
-
-function convertirDateCotisation(valeur) {
-  if (!valeur) {
-    return null;
-  }
-
-  if (typeof valeur.toDate === 'function') {
-    return valeur.toDate();
-  }
-
-  if (valeur instanceof Date) {
-    return valeur;
-  }
-
-  if (typeof valeur === 'number') {
-    return new Date(
-      valeur < 1e12 ? valeur * 1000 : valeur
-    );
-  }
-
-  if (typeof valeur === 'string') {
-    const date = new Date(valeur);
-
-    if (!Number.isNaN(date.getTime())) {
-      return date;
-    }
-  }
-
-  if (typeof valeur === 'object' && valeur.seconds) {
-    return new Date(valeur.seconds * 1000);
-  }
-
-  return null;
-}
-
-function obtenirDateTransaction(data) {
-  const champsDate = [
-    'timestamp',
-    'date',
-    'createdAt',
-    'created_at',
-    'createdOn',
-    'dateCreation',
-    'date_cotisation'
-  ];
-
-  for (const champ of champsDate) {
-    if (data[champ] !== undefined && data[champ] !== null) {
-      const date = convertirDateCotisation(data[champ]);
-
-      if (date && !Number.isNaN(date.getTime())) {
-        return date;
-      }
-    }
-  }
-
-  return null;
-}
 
 function obtenirNomTransaction(data) {
-  const champs = [
-    'name',
-    'memberName',
-    'nom',
-    'member',
-    'membre'
-  ];
-
-  for (const champ of champs) {
-    if (data[champ] !== undefined && data[champ] !== null) {
-      const nom = String(data[champ]).trim();
-
-      if (nom) {
-        return nom;
-      }
-    }
-  }
-
-  return 'Membre non identifié';
+  return String(data.name || data.memberName || data.nom || 'Membre').trim();
 }
 
 function obtenirMontantTransaction(data) {
-  const champs = [
-    'amount',
-    'montant',
-    'amountFCFA',
-    'montantFCFA'
-  ];
-
-  for (const champ of champs) {
-    if (data[champ] !== undefined && data[champ] !== null) {
-      const montant = Number(data[champ]);
-
-      if (Number.isFinite(montant)) {
-        return montant;
-      }
-    }
-  }
-
-  return 0;
+  return Number(data.amount || data.montant || 0);
 }
 
 function formaterMontant(montant) {
-  return new Intl.NumberFormat('fr-FR', {
-    maximumFractionDigits: 0
-  }).format(montant);
-}
-
-function formaterDateCotisation(date) {
-  if (!date) {
-    return 'date inconnue';
-  }
-
-  return new Intl.DateTimeFormat('fr-FR', {
-    timeZone: TIME_ZONE,
-    day: '2-digit',
-    month: '2-digit',
-    year: 'numeric',
-    hour: '2-digit',
-    minute: '2-digit',
-    second: '2-digit',
-    hour12: false
-  }).format(date);
+  return new Intl.NumberFormat('fr-FR', { maximumFractionDigits: 0 }).format(montant);
 }
 
 async function getCotisationsReport() {
-  if (!db) {
-    return '⚠️ Le service Firebase est indisponible. Vérifie le compte de service et la connexion à Firestore.';
-  }
-
+  if (!db) return '⚠️ Firebase indisponible.';
   try {
-    const snapshot = await db
-      .collection('transactions')
-      .limit(100)
-      .get();
+    const snapshot = await db.collection('transactions').limit(200).get();
+    if (snapshot.empty) return '📊 *TOTAL DES COTISATIONS* 🪙\nAucune cotisation enregistrée.';
 
-    if (snapshot.empty) {
-      return [
-        '📊 *CLASSEMENT DES COTISATIONS* 🪙',
-        '',
-        'Aucune cotisation enregistrée pour le moment.',
-        '',
-        '💰 *CUMUL TOTAL : 0 FCFA*',
-        '',
-        '💡 Merci pour votre fidélité ! 🙏✨'
-      ].join('\n');
-    }
+    const totauxParMembre = {};
+    let joannaTotal = 0;
+    let nomExactJoanna = 'Respo Joanna';
 
-    const transactions = snapshot.docs.map(doc => {
+    snapshot.docs.forEach(doc => {
       const data = doc.data();
+      const nomBrut = obtenirNomTransaction(data);
+      const montant = obtenirMontantTransaction(data);
 
-      return {
-        id: doc.id,
-        nom: obtenirNomTransaction(data),
-        montant: obtenirMontantTransaction(data),
-        date: obtenirDateTransaction(data)
-      };
+      if (nomBrut.toLowerCase().includes('joanna')) {
+        joannaTotal += montant;
+        if (nomBrut.length > nomExactJoanna.length) {
+          nomExactJoanna = nomBrut;
+        }
+      } else {
+        totauxParMembre[nomBrut] = (totauxParMembre[nomBrut] || 0) + montant;
+      }
     });
 
-    transactions.sort((a, b) => {
-      const dateA = a.date?.getTime() ?? Number.MAX_SAFE_INTEGER;
-      const dateB = b.date?.getTime() ?? Number.MAX_SAFE_INTEGER;
+    const autres = Object.keys(totauxParMembre).map(nom => ({
+      nom,
+      total: totauxParMembre[nom]
+    }));
+    autres.sort((a, b) => b.total - a.total);
 
-      return dateA - dateB;
-    });
+    const classement = [];
+    if (joannaTotal > 0) {
+      classement.push({ nom: nomExactJoanna, total: joannaTotal });
+    }
+    classement.push(...autres);
 
-    let cumulTotal = 0;
-
-    const lignes = transactions.map((transaction, index) => {
+    const lignes = classement.map((item, index) => {
       const symbole = index === 0 ? '🥇' : '✅';
-      const date = formaterDateCotisation(transaction.date);
-      const montant = formaterMontant(transaction.montant);
-
-      cumulTotal += transaction.montant;
-
-      return `${symbole} *${transaction.nom}* : +${montant} FCFA _(${date})_`;
+      return `${symbole} *${item.nom}* : *${formaterMontant(item.total)} FCFA*`;
     });
 
     return [
-      '📊 *CLASSEMENT DES COTISATIONS* 🪙',
+      '📊 *TOTAL DES COTISATIONS PAR MEMBRE* 🪙',
       '',
       ...lignes,
-      '',
-      `💰 *CUMUL TOTAL : ${formaterMontant(cumulTotal)} FCFA*`,
       '',
       '💡 Merci pour votre fidélité ! 🙏✨'
     ].join('\n');
   } catch (error) {
-    console.error('❌ Erreur rapport cotisations :', error.message);
-
-    return '❌ Impossible de récupérer les cotisations pour le moment.';
+    return '❌ Erreur récupération cotisations.';
   }
 }
 
-// Nouvelle fonction pour afficher ceux qui n'ont pas encore payé (retards/impayés)
 async function getImpayesReport() {
-  if (!db) {
-    return '⚠️ Le service Firebase est indisponible.';
-  }
-
+  if (!db) return '⚠️ Firebase indisponible.';
   try {
-    const snapshot = await db
-      .collection('transactions')
-      .limit(100)
-      .get();
-
-    // Récupérer la liste des noms de ceux qui ont payé (en minuscules pour éviter les erreurs de casse)
+    const snapshot = await db.collection('transactions').limit(100).get();
     const payeursSet = new Set();
-    snapshot.docs.forEach(doc => {
-      const nom = obtenirNomTransaction(doc.data()).toLowerCase().trim();
-      payeursSet.add(nom);
-    });
+    snapshot.docs.forEach(doc => payeursSet.add(obtenirNomTransaction(doc.data()).toLowerCase().trim()));
 
-    // Filtrer la liste officielle pour trouver ceux qui ne sont pas dans les payeurs
-    const impayes = LISTE_OFFICIELLE_MEMBRES.filter(
-      membre => !payeursSet.has(membre.toLowerCase().trim())
-    );
+    const impayes = LISTE_OFFICIELLE_MEMBRES.filter(m => !payeursSet.has(m.toLowerCase().trim()));
+    if (impayes.length === 0) return '🎉 Tout le monde a payé sa cotisation !';
 
-    if (impayes.length === 0) {
-      return [
-        '🎉 *ÉTAT DES COTISATIONS* 🪙',
-        '',
-        'Félicitations ! *Tout le monde* a payé sa cotisation. Personne n’est en retard ! 🌟'
-      ].join('\n');
-    }
-
-    const lignesImpayes = impayes.map(membre => `❌ *${membre}* (En retard)`).join('\n');
-
-    return [
-      '⏳ *LISTE DES PERSONNES EN RETARD (IMPAYÉS)* ⚠️',
-      '',
-      lignesImpayes,
-      '',
-      `Total en retard : *${impayes.length} personne(s)*`,
-      '',
-      '💡 Pensez à régulariser votre situation svp ! 🙏'
-    ].join('\n');
-
-  } catch (error) {
-    console.error('❌ Erreur rapport impayés :', error.message);
-    return '❌ Impossible de récupérer la liste des retards pour le moment.';
+    return ['⏳ *PERSONNES EN RETARD (IMPAYÉS)* ⚠️', '', impayes.map(m => `❌ *${m}*`).join('\n'), '', `Total : ${impayes.length} personne(s)`].join('\n');
+  } catch (e) {
+    return '❌ Erreur rapport retards.';
   }
 }
 
 // ======================================================
-// PROGRAMME DE L'ÉGLISE (NOVEMBRE ET DÉCEMBRE)
+// PROGRAMME DE L'ÉGLISE
 // ======================================================
 
 let texteProgrammeMois = `⛪ *ÉGLISE DES ASSEMBLÉES DE DIEU ABOBO BELLEVILLE - TEMPLE LA RESTAURATION DIVINE*
@@ -1142,637 +594,146 @@ let texteProgrammeMois = `⛪ *ÉGLISE DES ASSEMBLÉES DE DIEU ABOBO BELLEVILLE 
 • *20/12/26* : Adoration: Marie Ange | Célébration: Mme Diallo | 1ère & 2e Offrande: Berenice
 • *27/12/26* : Adoration: Joanne | Célébration: Anne | 1ère & 2e Offrande: Mme Diby`;
 
-function obtenirProgramme() {
-  return texteProgrammeMois;
-}
-
 // ======================================================
-// COMMANDES
+// COMMANDES ET TRAITEMENT DES MESSAGES
 // ======================================================
 
 async function traiterCommande(jid, texte, message) {
   const commande = texte.trim().split(/\s+/)[0].toLowerCase();
-
   switch (commande) {
     case '!aide':
-    case '!help': {
-      const aide = [
-        `🤖 *COMMANDES DE ${BOT_NAME}*`,
-        '',
-        '🆔 `!id` — afficher l’identifiant du groupe',
-        '🧠 `!resetia` — réinitialiser ma mémoire de conversation',
-        '📅 `!programme` — afficher le programme',
-        '🪙 `!cotisation` — afficher les cotisations et le cumul total',
-        '⚠️ `!retard` (ou `!impayes`) — afficher la liste de ceux qui n’ont pas payé',
-        '📌 `!setprogramme texte` — définir le programme',
-        '',
-        'Tu peux aussi me mentionner ou m’envoyer un message vocal.'
-      ].join('\n');
-
-      await envoyerReponse(jid, aide, message);
+    case '!help':
+      await envoyerReponse(jid, `🤖 *COMMANDES*\n!id, !resetia, !programme, !cotisation, !retard`, message);
       return true;
-    }
-
-    case '!id': {
-      await envoyerReponse(
-        jid,
-        `🆔 Identifiant de cette conversation :\n${jid}`,
-        message
-      );
-
+    case '!id':
+      await envoyerReponse(jid, `🆔 ID : ${jid}`, message);
       return true;
-    }
-
-    case '!resetia': {
-      const conversationId = obtenirConversationId(message);
-
-      reinitialiserHistorique(conversationId);
-
-      await envoyerReponse(
-        jid,
-        '🧠 C’est fait ! Je repars sur une nouvelle conversation avec toi.',
-        message
-      );
-
+    case '!resetia':
+      reinitialiserHistorique(obtenirConversationId(message));
+      await envoyerReponse(jid, '🧠 Mémoire réinitialisée !', message);
       return true;
-    }
-
-    case '!programme': {
-      await envoyerReponse(jid, obtenirProgramme(), message);
+    case '!programme':
+      await envoyerReponse(jid, texteProgrammeMois, message);
       return true;
-    }
-
     case '!cotisation':
     case '!cotisations':
-    case '!c': {
-      const rapport = await getCotisationsReport();
-
-      await envoyerReponse(jid, rapport, message);
+    case '!c':
+      await envoyerReponse(jid, await getCotisationsReport(), message);
       return true;
-    }
-
     case '!retard':
-    case '!impayes': {
-      const rapportRetard = await getImpayesReport();
-
-      await envoyerReponse(jid, rapportRetard, message);
+    case '!impayes':
+      await envoyerReponse(jid, await getImpayesReport(), message);
       return true;
-    }
-
-    case '!setprogramme': {
-      const nouveauProgramme = texte
-        .replace(/^!setprogramme\s*/i, '')
-        .trim();
-
-      if (!nouveauProgramme) {
-        await envoyerReponse(
-          jid,
-          'Utilisation : !setprogramme suivi du texte du programme.',
-          message
-        );
-
-        return true;
-      }
-
-      texteProgrammeMois = nouveauProgramme;
-
-      await envoyerReponse(
-        jid,
-        '✅ Programme mis à jour en mémoire.',
-        message
-      );
-
-      return true;
-    }
-
     default:
       return false;
   }
 }
 
-// ======================================================
-// TRAITEMENT DES MESSAGES
-// ======================================================
-
 async function traiterMessage(message) {
-  if (!message?.message || estMessageDeMoi(message)) {
-    return;
-  }
-
+  if (!message?.message || estMessageDeMoi(message)) return;
   const jid = obtenirJid(message);
+  if (!jid || jid === 'status@broadcast') return;
 
-  if (!jid || jid === 'status@broadcast') {
+  const texte = obtenirTexteMessage(message);
+  if (estCommande(texte)) {
+    await traiterCommande(jid, texte, message);
     return;
   }
 
-  const messageId = message.key?.id;
-
-  if (!messageId || processingMessages.has(messageId)) {
+  if (estMessageAudio(message)) {
+    try {
+      await envoyerTexte(jid, '🎧 J’écoute...');
+      const audioBuffer = await telechargerMedia(message, 'audio');
+      const transcription = await transcrireAudio(audioBuffer);
+      const reponse = await genererIA(transcription, obtenirConversationId(message));
+      await envoyerReponseVocale(jid, reponse, message);
+    } catch (e) {
+      await envoyerReponse(jid, '❌ Erreur traitement vocal.');
+    }
     return;
   }
 
-  processingMessages.add(messageId);
-
-  try {
-    const texte = obtenirTexteMessage(message);
-
-    const groupe = estMessageDeGroupe(message);
-
-    const commande = estCommande(texte);
-
-    const mention = estMentionBot(message, texte);
-
-    const reponseAuBot = estReponseAuBot(message);
-
-    if (groupe && !commande && !mention && !reponseAuBot) {
-      await ajouterMemoireGroupe(jid, texte);
-      return;
-    }
-
-    const nom = obtenirNomExpediteur(message);
-
-    console.log(
-      `📩 Message de ${nom} dans ${jid} : ${texte.slice(0, 150)}`
-    );
-
-    if (commande) {
-      await traiterCommande(jid, texte, message);
-      return;
-    }
-
-    const contenu = obtenirMessageReel(message);
-
-    if (contenu.imageMessage) {
-      await envoyerTexte(jid, '👀 Je regarde ton image...');
-
-      try {
-        const imageBuffer = await telechargerMedia(message, 'image');
-
-        const question = texte ||
-          contenu.imageMessage.caption ||
-          'Décris cette image.';
-
-        const analyse = await analyserImage(imageBuffer, question);
-
-        await envoyerReponse(jid, analyse, message);
-      } catch (error) {
-        console.error('❌ Traitement image :', error.message);
-
-        await envoyerReponse(
-          jid,
-          'Je n’ai pas pu traiter cette image. Essaie avec une image plus légère.',
-          message
-        );
-      }
-
-      return;
-    }
-
-    if (estMessageAudio(message)) {
-      try {
-        await envoyerTexte(jid, '🎧 J’écoute ton message vocal...');
-
-        const audioBuffer = await telechargerMedia(message, 'audio');
-
-        const transcription = await transcrireAudio(audioBuffer);
-
-        console.log('🗣️ Transcription obtenue.');
-
-        const conversationId = obtenirConversationId(message);
-
-        const memoireGroupe = groupe
-          ? await lireMemoireGroupe(jid)
-          : [];
-
-        const contexteMemoire = memoireGroupe.length
-          ? '\n\nInformations précédemment retenues pour ce groupe :\n' +
-            memoireGroupe
-              .slice(-10)
-              .map(item => `- ${item.text}`)
-              .join('\n')
-          : '';
-
-        const question = contexteMemoire
-          ? `${transcription}${contexteMemoire}`
-          : transcription;
-
-        const reponse = await genererIA(
-          question,
-          conversationId
-        );
-
-        await ajouterMemoireGroupe(jid, transcription);
-
-        if (VOICE_REPLY_ENABLED) {
-          await envoyerReponseVocale(jid, reponse, message);
-        } else {
-          await envoyerReponse(jid, reponse, message);
-        }
-      } catch (error) {
-        console.error('❌ Traitement vocal :', error.message);
-
-        await envoyerReponse(
-          jid,
-          'Désolé, je n’ai pas réussi à traiter ton message vocal.',
-          message
-        );
-      }
-
-      return;
-    }
-
-    if (!texte) {
-      return;
-    }
-
-    if (
-      /\b(qui es[- ]tu|qui est[- ]tu|qui t['’]a créé|qui ta créé|ton créateur|ton createur|qui t['’]a développé|qui ta developpe)\b/i
-        .test(texte)
-    ) {
-      await envoyerReponse(
-        jid,
-        `Je suis ${BOT_NAME}, créé et développé par ${CREATOR_NAME}. 😊`,
-        message
-      );
-
-      return;
-    }
-
-    const conversationId = obtenirConversationId(message);
-
-    const memoireGroupe = groupe
-      ? await lireMemoireGroupe(jid)
-      : [];
-
-    let question = texte;
-
-    if (memoireGroupe.length) {
-      const contexte = memoireGroupe
-        .slice(-8)
-        .map(item => `- ${item.text}`)
-        .join('\n');
-
-      question +=
-        '\n\nContexte mémorisé pour ce groupe (à utiliser seulement si pertinent) :\n' +
-        contexte;
-    }
-
-    const reponse = await genererIA(
-      question,
-      conversationId
-    );
-
-    await ajouterMemoireGroupe(jid, texte);
-
+  if (texte) {
+    const reponse = await genererIA(texte, obtenirConversationId(message));
     await envoyerReponse(jid, reponse, message);
-  } catch (error) {
-    console.error('❌ Erreur traitement message :', error);
-
-    await envoyerReponse(
-      obtenirJid(message),
-      'Désolé, une erreur est survenue. Réessaie dans un instant.',
-      message
-    );
-  } finally {
-    processingMessages.delete(message.key?.id);
   }
 }
 
 // ======================================================
-// RAPPELS ET MESSAGES PROGRAMMÉS
-// ======================================================
-
-async function envoyerAuGroupe(texte) {
-  if (!WHATSAPP_GROUP_ID || !sock || !whatsappConnected) {
-    console.warn('⚠️ Envoi groupe impossible : non connecté ou ID manquant.');
-    return;
-  }
-
-  try {
-    await sock.sendMessage(WHATSAPP_GROUP_ID, { text: texte });
-    console.log('✅ Message programmé envoyé au groupe avec succès.');
-  } catch (error) {
-    console.error('❌ Erreur envoi groupé programmé :', error.message);
-  }
-}
-
-function configurerCron() {
-  // 1. Méditation quotidienne à 06 h 30
-  cron.schedule(
-    '30 6 * * *',
-    async () => {
-      try {
-        const prompt = 'Génère une courte méditation biblique du matin. Donne un verset biblique exact, une explication très simple et un encouragement chaleureux. Maximum 5 lignes.';
-        const texteMeditation = await genererIA(prompt, 'meditation-matin');
-
-        await envoyerAuGroupe(
-          '🌅 *MÉDITATION DU MATIN* 🙏\n\n' +
-          texteMeditation +
-          '\n\nExcellente et bénie journée à tous ! ✨'
-        );
-      } catch (err) {
-        console.error('❌ Erreur cron méditation :', err.message);
-      }
-    },
-    { timezone: TIME_ZONE }
-  );
-
-  // 2. Rapport des cotisations le dimanche à 17 h
-  cron.schedule(
-    '0 17 * * 0',
-    async () => {
-      const rapport = await getCotisationsReport();
-      await envoyerAuGroupe(
-        '📢 *BILAN DES COTISATIONS DU DIMANCHE* 🪙\n\n' + rapport
-      );
-    },
-    { timezone: TIME_ZONE }
-  );
-
-  console.log('✅ Tâches programmées configurées et fonctionnelles.');
-}
-
-// ======================================================
-// CONNEXION WHATSAPP
+// CONNEXION WHATSAPP AVEC PERSISTENCE FIREBASE
 // ======================================================
 
 async function connectToWhatsApp() {
-  if (connexionEnCours) {
-    console.log('⏳ Connexion déjà en cours.');
-    return;
-  }
-
+  if (connexionEnCours) return;
   connexionEnCours = true;
-
   const generation = ++connectionGeneration;
 
   try {
-    const { state, saveCreds } = await useMultiFileAuthState(
-      AUTH_DIR
-    );
-
-    const versionInfo = await fetchLatestBaileysVersion();
-
-    const version = versionInfo.version;
-
-    console.log('📦 Version WhatsApp :', version.join('.'));
+    const { state, saveCreds } = await useFirebaseAuthState();
+    const { version } = await fetchLatestBaileysVersion();
 
     sock = makeWASocket({
       version,
       auth: state,
       logger: pino({ level: 'silent' }),
       printQRInTerminal: false,
-      browser: [BOT_NAME, 'Chrome', '1.0.0'],
-      markOnlineOnConnect: false,
-      syncFullHistory: false,
-      generateHighQualityLinkPreview: false
+      browser: [BOT_NAME, 'Chrome', '1.0.0']
     });
 
     sock.ev.on('creds.update', saveCreds);
 
     sock.ev.on('connection.update', async update => {
-      if (generation !== connectionGeneration) {
-        return;
-      }
-
-      const { connection, lastDisconnect, qr } = update;
+      if (generation !== connectionGeneration) return;
+      const { connection, qr } = update;
 
       if (qr) {
-        latestQR = qr;
-
-        try {
-          qrDataURL = await QRCode.toDataURL(qr);
-          console.log('📱 Nouveau QR code disponible.');
-        } catch (error) {
-          console.error('❌ Génération QR :', error.message);
-        }
+        qrDataURL = await QRCode.toDataURL(qr);
+        console.log('📱 Nouveau QR code disponible.');
       }
-
-      if (connection === 'connecting') {
-        console.log('🔄 Connexion à WhatsApp...');
-      }
-
       if (connection === 'open') {
         whatsappConnected = true;
-        latestQR = null;
         qrDataURL = null;
-
-        console.log(`✅ ${BOT_NAME} est connecté à WhatsApp.`);
+        console.log(`✅ ${BOT_NAME} connecté à WhatsApp.`);
       }
-
       if (connection === 'close') {
         whatsappConnected = false;
-
-        const statusCode =
-          lastDisconnect?.error instanceof Boom
-            ? lastDisconnect.error.output?.statusCode
-            : lastDisconnect?.error?.output?.statusCode;
-
-        console.error(
-          '❌ Connexion fermée. Code :',
-          statusCode ?? 'inconnu'
-        );
-
-        if (statusCode === DisconnectReason.loggedOut) {
-          console.error(
-            '🚫 Session déconnectée. Il faut rescanner le QR code.'
-          );
-
-          return;
-        }
-
-        if (reconnectTimer) {
-          clearTimeout(reconnectTimer);
-        }
-
-        reconnectTimer = setTimeout(() => {
-          if (
-            generation === connectionGeneration &&
-            !whatsappConnected
-          ) {
-            console.log('🔄 Tentative de reconnexion...');
-
-            connectToWhatsApp().catch(error => {
-              console.error(
-                '❌ Reconnexion échouée :',
-                error.message
-              );
-            });
-          }
-        }, 5000);
+        setTimeout(() => connectToWhatsApp(), 5000);
       }
     });
 
     sock.ev.on('messages.upsert', async event => {
-      if (generation !== connectionGeneration) {
-        return;
-      }
-
-      if (event.type !== 'notify') {
-        return;
-      }
-
+      if (generation !== connectionGeneration || event.type !== 'notify') return;
       for (const message of event.messages || []) {
-        traiterMessage(message).catch(error => {
-          console.error(
-            '❌ Erreur message WhatsApp :',
-            error.message
-          );
-        });
+        traiterMessage(message).catch(() => {});
       }
     });
   } catch (error) {
-    console.error(
-      '❌ Impossible de connecter WhatsApp :',
-      error.message
-    );
-
-    if (reconnectTimer) {
-      clearTimeout(reconnectTimer);
-    }
-
-    reconnectTimer = setTimeout(() => {
-      connectToWhatsApp().catch(console.error);
-    }, 10000);
+    setTimeout(() => connectToWhatsApp(), 10000);
   } finally {
     connexionEnCours = false;
   }
 }
 
 // ======================================================
-// SERVEUR WEB : QR CODE ET ÉTAT DU BOT
+// SERVEUR WEB
 // ======================================================
 
-app.get('/', async (req, res) => {
+const appServer = express();
+appServer.get('/', (req, res) => {
   if (whatsappConnected) {
-    return res.send(`
-      <!DOCTYPE html>
-      <html lang="fr">
-      <head>
-        <meta charset="UTF-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1">
-        <meta http-equiv="refresh" content="15">
-        <title>${BOT_NAME}</title>
-        <style>
-          body {
-            font-family: Arial, sans-serif;
-            background: #101820;
-            color: white;
-            text-align: center;
-            padding: 30px 15px;
-          }
-          .card {
-            max-width: 500px;
-            margin: 40px auto;
-            padding: 25px;
-            border-radius: 15px;
-            background: #1d2b36;
-          }
-          .ok {
-            color: #52e3a3;
-            font-size: 22px;
-          }
-        </style>
-      </head>
-      <body>
-        <div class="card">
-          <h1>🤖 ${BOT_NAME}</h1>
-          <p class="ok">✅ WhatsApp connecté</p>
-          <p>Le bot est opérationnel.</p>
-          <p>Créateur : ${CREATOR_NAME}</p>
-        </div>
-      </body>
-      </html>
-    `);
+    return res.send(`<h2>✅ ${BOT_NAME} est connecté à WhatsApp ! Plus besoin de scanner.</h2>`);
   }
-
   if (!qrDataURL) {
-    return res.send(`
-      <!DOCTYPE html>
-      <html lang="fr">
-      <head>
-        <meta charset="UTF-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1">
-        <meta http-equiv="refresh" content="5">
-        <title>${BOT_NAME}</title>
-      </head>
-      <body style="font-family:Arial;text-align:center;padding:30px">
-        <h1>🤖 ${BOT_NAME}</h1>
-        <p>⏳ En attente du QR code WhatsApp...</p>
-      </body>
-      </html>
-    `);
+    return res.send(`<h2>⏳ Chargement du QR code... Rafraîchis la page.</h2>`);
   }
-
-  res.send(`
-    <!DOCTYPE html>
-    <html lang="fr">
-    <head>
-      <meta charset="UTF-8">
-      <meta name="viewport" content="width=device-width, initial-scale=1">
-      <meta http-equiv="refresh" content="15">
-      <title>Connexion ${BOT_NAME}</title>
-      <style>
-        body {
-          font-family: Arial, sans-serif;
-          text-align: center;
-          background: #101820;
-          color: white;
-          padding: 25px 10px;
-        }
-        .card {
-          max-width: 450px;
-          margin: auto;
-          padding: 25px;
-          background: #1d2b36;
-          border-radius: 15px;
-        }
-        img {
-          width: 260px;
-          max-width: 90%;
-          background: white;
-          padding: 10px;
-          border-radius: 10px;
-        }
-      </style>
-    </head>
-    <body>
-      <div class="card">
-        <h1>🤖 ${BOT_NAME}</h1>
-        <p>📱 Scanne ce QR code avec WhatsApp.</p>
-        <img src="${qrDataURL}" alt="QR code WhatsApp">
-      </div>
-    </body>
-    </html>
-  `);
+  res.send(`<h2>Scanne ce QR code :</h2><img src="${qrDataURL}"/>`);
 });
 
-app.get('/health', (req, res) => {
-  res.status(200).json({
-    status: 'ok',
-    bot: BOT_NAME,
-    whatsapp: whatsappConnected,
-    groq: Boolean(groq),
-    firebase: Boolean(db),
-    time: obtenirDateAbidjan()
-  });
-});
-
-// ======================================================
-// DÉMARRAGE DU SERVEUR
-// ======================================================
+appServer.get('/health', (req, res) => res.json({ status: 'ok', whatsapp: whatsappConnected }));
 
 async function demarrer() {
-  app.listen(PORT, '0.0.0.0', () => {
-    console.log(`🌐 Serveur ${BOT_NAME} actif sur le port ${PORT}.`);
-  });
-
-  configurerCron();
-
+  appServer.listen(PORT, '0.0.0.0', () => console.log(`Serveur sur le port ${PORT}`));
   await connectToWhatsApp();
 }
 
-demarrer().catch(error => {
-  console.error('❌ Erreur démarrage :', error);
-  process.exitCode = 1;
-});
+demarrer();
