@@ -557,17 +557,38 @@ async function getCotisationsReport() {
   }
 }
 
+
 async function getImpayesReport() {
   if (!db) return '⚠️ Firebase indisponible.';
   try {
-    const snapshot = await db.collection('transactions').limit(100).get();
+    const snapshot = await db.collection('transactions').limit(200).get();
     const payeursSet = new Set();
-    snapshot.docs.forEach(doc => payeursSet.add(obtenirNomTransaction(doc.data()).toLowerCase().trim()));
 
-    const impayes = LISTE_OFFICIELLE_MEMBRES.filter(m => !payeursSet.has(m.toLowerCase().trim()));
+    snapshot.docs.forEach(doc => {
+      const data = doc.data();
+      // On récupère le nom quel que soit le champ utilisé dans Firestore
+      const nomBrut = data.name || data.memberName || data.nom || data.member || data.membre || '';
+      if (nomBrut) {
+        payeursSet.add(String(nomBrut).toLowerCase().trim());
+      }
+    });
+
+    const impayes = LISTE_OFFICIELLE_MEMBRES.filter(membre => {
+      const nomMembre = membre.toLowerCase().trim();
+      // Vérifie si un payeur contient ou correspond au nom du membre officiel
+      const estPaye = Array.from(payeursSet).some(payeur => payeur.includes(nomMembre));
+      return !estPaye;
+    });
+
     if (impayes.length === 0) return '🎉 Tout le monde a payé sa cotisation !';
 
-    return ['⏳ *PERSONNES EN RETARD (IMPAYÉS)* ⚠️', '', impayes.map(m => `❌ *${m}*`).join('\n'), '', `Total : ${impayes.length} personne(s)`].join('\n');
+    return [
+      '⏳ *PERSONNES EN RETARD (IMPAYÉS)* ⚠️',
+      '',
+      impayes.map(m => `❌ *${m}*`).join('\n'),
+      '',
+      `Total : ${impayes.length} personne(s)`
+    ].join('\n');
   } catch (e) {
     return '❌ Erreur rapport retards.';
   }
