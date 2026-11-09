@@ -63,7 +63,6 @@ const LISTE_OFFICIELLE_MEMBRES = [
   "Chantre Stéphane"
 ];
 
-
 let groq = null;
 if (GROQ_API_KEY) {
   groq = new Groq({ apiKey: GROQ_API_KEY });
@@ -334,19 +333,28 @@ async function traiterMessage(message) {
   if (!message?.message || estMessageDeMoi(message)) return;
   const jid = obtenirJid(message);
   if (!jid || jid === 'status@broadcast') return;
+
   const texte = obtenirTexteMessage(message);
   const groupe = estMessageDeGroupe(message);
   const commande = estCommande(texte);
-  const mention = estMentionBot(texte);
-  const reponseAuBot = estReponseAuBot(message);
   
+  // Détection élargie du nom "hbot" peu importe les majuscules/minuscules
+  const mention = /\b(h-?bot)\b/i.test(texte) || estMentionBot(texte);
+  const reponseAuBot = estReponseAuBot(message);
+
+  // Si c'est un groupe et que le bot n'est ni commandé, ni mentionné, il se contente d'enregistrer en mémoire sans répondre
   if (groupe && !commande && !mention && !reponseAuBot) {
     if (texte) await ajouterMemoireGroupe(jid, texte);
     return;
   }
-  
-  if (commande) { await traiterCommande(jid, texte, message); return; }
-  
+
+  // Si c'est une commande (!cotisation, !retard, !programme, etc.), on répond en texte
+  if (commande) {
+    await traiterCommande(jid, texte, message);
+    return;
+  }
+
+  // Si c'est un message audio, on transcrit et on répond en vocal
   if (estMessageAudio(message)) {
     try {
       await envoyerTexte(jid, '🎧 J’écoute...');
@@ -354,18 +362,26 @@ async function traiterMessage(message) {
       const transcription = await transcrireAudio(audioBuffer);
       const reponse = await genererIA(transcription, obtenirConversationId(message));
       await envoyerReponseVocale(jid, reponse, message);
-    } catch { await envoyerReponse(jid, '❌ Erreur traitement vocal.'); }
+    } catch { 
+      await envoyerReponse(jid, '❌ Erreur traitement vocal.'); 
+    }
     return;
   }
-  
+
+  // Si l'utilisateur a écrit du texte en mentionnant "Hbot", le bot génère la réponse et RÉPOND EN VOCAL 🎙️
   if (texte) {
     const conversationId = obtenirConversationId(message);
     const memoireGroupe = groupe ? await lireMemoireGroupe(jid) : [];
     let question = texte;
-    if (memoireGroupe.length) question += '\n\nContexte mémorisé :\n' + memoireGroupe.slice(-8).map(i => `- ${i.text}`).join('\n');
+    if (memoireGroupe.length) {
+      question += '\n\nContexte mémorisé :\n' + memoireGroupe.slice(-8).map(i => `- ${i.text}`).join('\n');
+    }
+    
     const reponse = await genererIA(question, conversationId);
     if (groupe) await ajouterMemoireGroupe(jid, texte);
-    await envoyerReponse(jid, reponse, message);
+    
+    // Réponse vocale garantie pour les interactions textuelles avec le bot
+    await envoyerReponseVocale(jid, reponse, message);
   }
 }
 
