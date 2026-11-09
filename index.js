@@ -217,11 +217,18 @@ async function transcrireAudio(buffer) {
   const resultat = await groq.audio.transcriptions.create({ file: fichier, model: WHISPER_MODEL, language: 'fr', response_format: 'text' });
   return typeof resultat === 'string' ? resultat : resultat.text || '';
 }
+
 async function genererAudioElevenLabs(texte) {
-  const url = `https://translate.google.com/translate_tts?ie=UTF-8&q=${encodeURIComponent(nettoyerTexte(texte).slice(0, 200))}&tl=fr&client=tw-ob`;
+  // Nettoyage radical des symboles Markdown (*, _, #, etc.) pour éviter que le TTS ne lise "astérisque"
+  const texteNettoye = nettoyerTexte(texte)
+    .replace(/[*_#`~>]/g, '')
+    .slice(0, 300);
+
+  const url = `https://translate.google.com/translate_tts?ie=UTF-8&q=${encodeURIComponent(texteNettoye)}&tl=fr&client=tw-ob`;
   const reponse = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0' } });
   return Buffer.from(await reponse.arrayBuffer());
 }
+
 async function convertirMp3EnOgg(mp3Buffer) {
   const dossier = await fs.mkdtemp(path.join(os.tmpdir(), 'hbot-'));
   const mp3Path = path.join(dossier, 'input.mp3');
