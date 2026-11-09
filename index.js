@@ -41,10 +41,27 @@ let connectionGeneration = 0;
 const conversations = new Map();
 
 const LISTE_OFFICIELLE_MEMBRES = [
-  "Joanna", "Armand", "Sea Franck", "Koulate jean Christ", 
-  "Samuel", "Issouph", "Nancy", "Marina", "Berenice", 
-  "Lili", "Mbro", "Diby", "Anne", "Mme Assamoi", "Mme Diallo", "Evodie", "Marie Ange"
+  "Respo Joanna",
+  "Chantre Lili",
+  "Chantre Sea Franck",
+  "Respo Assamoi",
+  "Chantre madame Assamoi",
+  "Respo Armand",
+  "Maestro Ange",
+  "Chantre Maman Anne",
+  "Chantre maman DIBY",
+  "Chantre Berenice",
+  "Chantre Nancy",
+  "Chantre Maman Diallo",
+  "Maestro issouph",
+  "Chantre Koulate jean Christ",
+  "Chantre maman M’BROH",
+  "Maestro Samuel",
+  "Chantre Marina",
+  "RESPO DJE",
+  "Chantre Stéphane"
 ];
+
 
 let groq = null;
 if (GROQ_API_KEY) {
