@@ -59,6 +59,7 @@ const LISTE_OFFICIELLE_MEMBRES = [
   "Maestro Samuel",
   "Chantre Marina",
   "RESPO DJE",
+  "Chantre Evodie",
   "Chantre Stéphane"
 ];
 
