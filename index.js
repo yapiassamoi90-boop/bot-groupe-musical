@@ -354,7 +354,7 @@ async function traiterMessage(message) {
     return;
   }
 
-  // Si c'est un message audio, on transcrit et on répond en vocal
+  // Si c'est un message audio, on transcrit et on répond en VOCAL
   if (estMessageAudio(message)) {
     try {
       await envoyerTexte(jid, '🎧 J’écoute...');
@@ -368,7 +368,7 @@ async function traiterMessage(message) {
     return;
   }
 
-  // Si l'utilisateur a écrit du texte en mentionnant "Hbot", le bot génère la réponse et RÉPOND EN VOCAL 🎙️
+  // Si l'utilisateur a écrit du texte en mentionnant "Hbot", le bot génère la réponse et répond par ÉCRIT 💬
   if (texte) {
     const conversationId = obtenirConversationId(message);
     const memoireGroupe = groupe ? await lireMemoireGroupe(jid) : [];
@@ -380,8 +380,8 @@ async function traiterMessage(message) {
     const reponse = await genererIA(question, conversationId);
     if (groupe) await ajouterMemoireGroupe(jid, texte);
     
-    // Réponse vocale garantie pour les interactions textuelles avec le bot
-    await envoyerReponseVocale(jid, reponse, message);
+    // Réponse classique par ÉCRIT pour les messages écrits
+    await envoyerReponse(jid, reponse, message);
   }
 }
 
