@@ -155,7 +155,7 @@ function obtenirTexteMessage(message) {
   const contenu = obtenirMessageReel(message);
   return (contenu.conversation || contenu.extendedTextMessage?.text || contenu.imageMessage?.caption || contenu.videoMessage?.caption || '').trim();
 }
-function estCommande(texte = '') { return /^!(aide|help|id|resetia|programme|cotisation|cotisations|c|setprogramme|retard|impayes)\b/i.test(texte.trim()); }
+function estCommande(texte = '') { return /^!(aide|help|id|resetia|programme|cotisation|cotisations|c|setprogramme|retard|impayes|medit)\b/i.test(texte.trim()); }
 function estMessageDeMoi(message) { return message?.key?.fromMe === true; }
 function estMessageDeGroupe(message) { return String(message?.key?.remoteJid || '').endsWith('@g.us'); }
 function obtenirConversationId(message) { const jid = message?.key?.remoteJid || ''; const p = message?.key?.participant || ''; return estMessageDeGroupe(message) ? `${jid}:${p}` : jid; }
@@ -219,13 +219,13 @@ async function transcrireAudio(buffer) {
 }
 
 async function genererAudioElevenLabs(texte) {
-  // Nettoyage radical des symboles Markdown (*, _, #, etc.) pour éviter que le TTS ne lise "astérisque"
   const texteNettoye = nettoyerTexte(texte)
     .replace(/[*_#`~>]/g, '')
-    .slice(0, 300);
+    .slice(0, 250);
 
-  const url = `https://translate.google.com/translate_tts?ie=UTF-8&q=${encodeURIComponent(texteNettoye)}&tl=fr&client=tw-ob`;
-  const reponse = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0' } });
+  const url = `https://translate.google.com/translate_tts?ie=UTF-8&q=${encodeURIComponent(texteNettoye)}&tl=fr&client=gtx`;
+  const reponse = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' } });
+  if (!reponse.ok) throw new Error('Erreur TTS réseau');
   return Buffer.from(await reponse.arrayBuffer());
 }
 
@@ -249,7 +249,10 @@ async function envoyerReponseVocale(jid, texte, messageOriginal = null) {
     const ogg = await convertirMp3EnOgg(mp3);
     await sock.sendMessage(jid, { audio: ogg, mimetype: 'audio/ogg; codecs=opus', ptt: true, quoted: messageOriginal });
     return true;
-  } catch { return envoyerReponse(jid, texte, messageOriginal); }
+  } catch (err) {
+    console.error('Erreur génération vocale, repli texte :', err.message);
+    return envoyerReponse(jid, texte, messageOriginal);
+  }
 }
 
 function encoderJid(jid) { return Buffer.from(jid).toString('base64url'); }
@@ -326,12 +329,21 @@ async function traiterCommande(jid, texte, message) {
   const commande = texte.trim().split(/\s+/)[0].toLowerCase();
   switch (commande) {
     case '!aide': case '!help':
-      await envoyerReponse(jid, `🤖 *COMMANDES HBOT*\n🆔 !id\n🧠 !resetia\n📅 !programme\n🪙 !cotisation / !c\n⚠️ !retard / !impayes`, message); return true;
+      await envoyerReponse(jid, `🤖 *COMMANDES HBOT*\n🆔 !id\n🧠 !resetia\n📅 !programme\n🪙 !cotisation / !c\n⚠️ !retard / !impayes\n🌅 !medit`, message); return true;
     case '!id': await envoyerReponse(jid, `🆔 ID : ${jid}`, message); return true;
     case '!resetia': reinitialiserHistorique(obtenirConversationId(message)); await envoyerReponse(jid, '🧠 Mémoire réinitialisée !', message); return true;
     case '!programme': await envoyerReponse(jid, texteProgrammeMois, message); return true;
     case '!cotisation': case '!cotisations': case '!c': await envoyerReponse(jid, await getCotisationsReport(), message); return true;
     case '!retard': case '!impayes': await envoyerReponse(jid, await getImpayesReport(), message); return true;
+    case '!medit':
+      try {
+        const prompt = 'Génère une courte méditation biblique du matin. Un verset exact, explication simple, encouragement. Max 5 lignes.';
+        const medit = await genererIA(prompt, 'meditation-matin');
+        await envoyerReponse(jid, '🌅 *MÉDITATION DU MATIN* 🙏\n\n' + medit + '\n\nExcellente journée ! ✨', message);
+      } catch {
+        await envoyerReponse(jid, '❌ Erreur génération méditation.', message);
+      }
+      return true;
     default: return false;
   }
 }
@@ -345,37 +357,43 @@ async function traiterMessage(message) {
   const groupe = estMessageDeGroupe(message);
   const commande = estCommande(texte);
   
-  // Détection élargie du nom "hbot" peu importe les majuscules/minuscules
   const mention = /\b(h-?bot)\b/i.test(texte) || estMentionBot(texte);
   const reponseAuBot = estReponseAuBot(message);
+  const audio = estMessageAudio(message);
 
-  // Si c'est un groupe et que le bot n'est ni commandé, ni mentionné, il se contente d'enregistrer en mémoire sans répondre
-  if (groupe && !commande && !mention && !reponseAuBot) {
+  if (groupe && !commande && !mention && !reponseAuBot && !audio) {
     if (texte) await ajouterMemoireGroupe(jid, texte);
     return;
   }
 
-  // Si c'est une commande (!cotisation, !retard, !programme, etc.), on répond en texte
   if (commande) {
     await traiterCommande(jid, texte, message);
     return;
   }
 
-  // Si c'est un message audio, on transcrit et on répond en VOCAL
-  if (estMessageAudio(message)) {
+  if (audio) {
+    if (groupe && !mention && !reponseAuBot) {
+      return;
+    }
     try {
       await envoyerTexte(jid, '🎧 J’écoute...');
       const audioBuffer = await telechargerMedia(message, 'audio');
       const transcription = await transcrireAudio(audioBuffer);
-      const reponse = await genererIA(transcription, obtenirConversationId(message));
+      const memoireGroupe = groupe ? await lireMemoireGroupe(jid) : [];
+      let question = transcription;
+      if (memoireGroupe.length) {
+        question += '\n\nContexte mémorisé :\n' + memoireGroupe.slice(-8).map(i => `- ${i.text}`).join('\n');
+      }
+      const reponse = await genererIA(question, obtenirConversationId(message));
+      if (groupe) await ajouterMemoireGroupe(jid, `[Vocal] ${transcription}`);
       await envoyerReponseVocale(jid, reponse, message);
-    } catch { 
+    } catch (err) { 
+      console.error('Erreur traitement vocal :', err);
       await envoyerReponse(jid, '❌ Erreur traitement vocal.'); 
     }
     return;
   }
 
-  // Si l'utilisateur a écrit du texte en mentionnant "Hbot", le bot génère la réponse et répond par ÉCRIT 💬
   if (texte) {
     const conversationId = obtenirConversationId(message);
     const memoireGroupe = groupe ? await lireMemoireGroupe(jid) : [];
@@ -387,7 +405,6 @@ async function traiterMessage(message) {
     const reponse = await genererIA(question, conversationId);
     if (groupe) await ajouterMemoireGroupe(jid, texte);
     
-    // Réponse classique par ÉCRIT pour les messages écrits
     await envoyerReponse(jid, reponse, message);
   }
 }
